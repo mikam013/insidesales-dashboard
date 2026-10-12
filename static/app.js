@@ -426,22 +426,92 @@ function sumRevenueRows(rows) {
   return t;
 }
 
-function revenueTableRow(label, t) {
-  return `<tr>
+// `filter` ({rep, month, inbound, label}) makes the row clickable: clicking a
+// count opens the matching sales in the modal, filtered by that column's status.
+function revenueTableRow(label, t, filter, extraClass = "") {
+  const attr = filter ? ` data-filter="${escapeHTML(JSON.stringify({ ...filter, label }))}"` : "";
+  const cell = (status, html) => `<td class="num${filter ? " rev-cell" : ""}" data-status="${status}">${html}</td>`;
+  return `<tr class="${filter ? "rev-click " : ""}${extraClass}"${attr}>
     <td>${escapeHTML(label)}</td>
-    <td class="num">${t.sold}</td>
-    <td class="num">${currency(t.acv)}</td>
-    <td class="num">${t.sold ? currency(t.acv / t.sold) : "—"}</td>
-    <td class="num">${t.serviced}</td>
-    <td class="num">${currency(t.servicedAcv)}</td>
-    <td class="num">${t.serviced ? currency(t.servicedAcv / t.serviced) : "—"}</td>
-    <td class="num">${pctLabel(rate(t.serviced, t.sold))}</td>
-    <td class="num">${t.servicedActive} (${currency(t.servicedActiveAcv)})</td>
-    <td class="num">${t.sold - t.serviced} (${currency(t.acv - t.servicedAcv)})</td>
-    <td class="num">${t.multiyear} (${pctLabel(rate(t.multiyear, t.recurring))})</td>
-    <td class="num">${t.cancelled} (${currency(t.cancelledAcv)})</td>
+    ${cell("all", t.sold)}
+    ${cell("all", currency(t.acv))}
+    ${cell("all", t.sold ? currency(t.acv / t.sold) : "—")}
+    ${cell("serviced", t.serviced)}
+    ${cell("serviced", currency(t.servicedAcv))}
+    ${cell("serviced", t.serviced ? currency(t.servicedAcv / t.serviced) : "—")}
+    ${cell("serviced", pctLabel(rate(t.serviced, t.sold)))}
+    ${cell("servicedActive", `${t.servicedActive} (${currency(t.servicedActiveAcv)})`)}
+    ${cell("notServiced", `${t.sold - t.serviced} (${currency(t.acv - t.servicedAcv)})`)}
+    ${cell("multiyear", `${t.multiyear} (${pctLabel(rate(t.multiyear, t.recurring))})`)}
+    ${cell("cancelled", `${t.cancelled} (${currency(t.cancelledAcv)})`)}
   </tr>`;
 }
+
+const SALES_STATUS_LABEL = {
+  all: "Closed/Won",
+  serviced: "Serviced",
+  servicedActive: "Serviced & Active",
+  notServiced: "Not Serviced",
+  multiyear: "Multiyear",
+  cancelled: "Cancelled",
+};
+
+function salesMatching(filter, status) {
+  return revenueSales.filter((s) => {
+    if (filter.rep && s.group !== filter.rep) return false;
+    if (filter.month && !s.sold.startsWith(filter.month)) return false;
+    if (filter.inbound && !s.inbound) return false;
+    if (status === "serviced") return s.serviced;
+    if (status === "servicedActive") return s.serviced && !s.cancelled;
+    if (status === "notServiced") return !s.serviced;
+    if (status === "multiyear") return s.months >= 18;
+    if (status === "cancelled") return s.cancelled;
+    return true;
+  });
+}
+
+function saleStatusText(s) {
+  return s.serviced ? (s.cancelled ? "Serviced, then cancelled" : "Serviced & active") : s.cancelled ? "Cancelled before service" : `Not serviced (${s.initialStatus || "—"})`;
+}
+
+function salesTableHTML(list) {
+  return `<table class="deal-table call-log-table">
+    <thead><tr><th>Sold</th><th>Customer</th><th>Rep</th><th>Plan</th><th>City</th><th class="num">Contract Value</th><th class="num">ARV</th><th class="num">Months</th><th>Status</th></tr></thead>
+    <tbody>${list
+      .map(
+        (s) => `<tr>
+          <td class="nowrap">${formatDealDate(s.sold)}</td>
+          <td>${escapeHTML(s.customer)}${s.inbound ? ' <span class="call-pill">Inbound</span>' : ""}</td>
+          <td class="nowrap">${escapeHTML(s.rep)}</td>
+          <td>${escapeHTML(s.plan || "")}</td>
+          <td class="nowrap">${escapeHTML(s.city || "")}</td>
+          <td class="num">${currency(s.contractValue)}</td>
+          <td class="num">${currency(s.arv)}</td>
+          <td class="num">${s.months ?? "—"}</td>
+          <td class="nowrap">${saleStatusText(s)}</td>
+        </tr>`
+      )
+      .join("")}</tbody>
+  </table>`;
+}
+
+function openSalesModal(filter, status) {
+  const list = salesMatching(filter, status);
+  const total = list.reduce((sum, s) => sum + s.contractValue, 0);
+  const title = [filter.label, filter.inbound ? "Inbound" : null, SALES_STATUS_LABEL[status] || "Closed/Won"].filter(Boolean).join(" — ");
+  document.getElementById("rep-deals-title").textContent = title;
+  document.getElementById("rep-deals-body").innerHTML = list.length
+    ? `<p class="revenue-asof">${list.length} sales · ${currency(total)} total contract value</p>${salesTableHTML(list)}`
+    : `<p class="deal-table-empty">No sales match.</p>`;
+  document.getElementById("rep-deals-modal").classList.remove("hidden");
+}
+
+document.addEventListener("click", (e) => {
+  const row = e.target.closest("tr.rev-click");
+  if (!row) return;
+  const cell = e.target.closest("td[data-status]");
+  openSalesModal(JSON.parse(row.dataset.filter), cell ? cell.dataset.status : "all");
+});
 
 function revenueTable(rowsHTML, totalHTML) {
   return `<table class="deal-table call-log-table">
@@ -514,12 +584,12 @@ async function loadRevenue() {
       <div class="kpi-card"><div class="kpi-label">Multiyear</div><div class="kpi-value">${pctLabel(rate(team.multiyear, team.recurring))}</div><div class="kpi-small">${team.multiyear} of ${team.recurring} recurring (${team.m24}×24mo, ${team.m18}×18mo)</div></div>
       <div class="kpi-card"><div class="kpi-label">Still Active</div><div class="kpi-value">${team.sold - team.cancelled}</div><div class="kpi-small">${team.cancelled} cancelled (${currency(team.cancelledAcv)} ACV)</div></div>
     `;
-    const repRows = data.reps.map((rep) => revenueTableRow(rep, sumRevenueRows(data.rows.filter((r) => r.rep === rep)))).join("");
-    document.getElementById("revenue-rep-table").innerHTML = revenueTable(repRows, revenueTableRow("Team", team).replace("<tr>", '<tr class="revenue-total">'));
+    const repRows = data.reps.map((rep) => revenueTableRow(rep, sumRevenueRows(data.rows.filter((r) => r.rep === rep)), { rep })).join("");
+    document.getElementById("revenue-rep-table").innerHTML = revenueTable(repRows, revenueTableRow("Team", team, {}, "revenue-total"));
     const months = [...new Set(data.rows.map((r) => r.month))].sort();
     const monthLabel = (m) => new Date(`${m}-15T12:00:00`).toLocaleDateString("en-US", { month: "long", year: "numeric" });
-    const monthRows = months.map((m) => revenueTableRow(monthLabel(m), sumRevenueRows(data.rows.filter((r) => r.month === m)))).join("");
-    document.getElementById("revenue-month-table").innerHTML = revenueTable(monthRows, revenueTableRow("Total", team).replace("<tr>", '<tr class="revenue-total">'));
+    const monthRows = months.map((m) => revenueTableRow(monthLabel(m), sumRevenueRows(data.rows.filter((r) => r.month === m)), { month: m })).join("");
+    document.getElementById("revenue-month-table").innerHTML = revenueTable(monthRows, revenueTableRow("Total", team, {}, "revenue-total"));
 
     revenueSales = data.sales || [];
     const repSelect = document.getElementById("sales-list-rep");
@@ -539,11 +609,11 @@ async function loadRevenue() {
         <div class="kpi-card"><div class="kpi-label">Multiyear</div><div class="kpi-value">${pctLabel(rate(it.multiyear, it.recurring))}</div><div class="kpi-small">${it.multiyear} of ${it.recurring} recurring</div></div>
         <div class="kpi-card"><div class="kpi-label">Cancelled</div><div class="kpi-value">${it.cancelled}</div><div class="kpi-small">${currency(it.cancelledAcv)} ACV</div></div>
       `;
-      const inRepRows = inbound.reps.map((rep) => revenueTableRow(rep, sumRevenueRows(inbound.rows.filter((r) => r.rep === rep)))).join("");
-      document.getElementById("revenue-inbound-rep-table").innerHTML = revenueTable(inRepRows, revenueTableRow("Total", it).replace("<tr>", '<tr class="revenue-total">'));
+      const inRepRows = inbound.reps.map((rep) => revenueTableRow(rep, sumRevenueRows(inbound.rows.filter((r) => r.rep === rep)), { rep, inbound: true })).join("");
+      document.getElementById("revenue-inbound-rep-table").innerHTML = revenueTable(inRepRows, revenueTableRow("Total", it, { inbound: true }, "revenue-total"));
       const inMonths = [...new Set(inbound.rows.map((r) => r.month))].sort();
-      const inMonthRows = inMonths.map((m) => revenueTableRow(monthLabel(m), sumRevenueRows(inbound.rows.filter((r) => r.month === m)))).join("");
-      document.getElementById("revenue-inbound-month-table").innerHTML = revenueTable(inMonthRows, revenueTableRow("Total", it).replace("<tr>", '<tr class="revenue-total">'));
+      const inMonthRows = inMonths.map((m) => revenueTableRow(monthLabel(m), sumRevenueRows(inbound.rows.filter((r) => r.month === m)), { month: m, inbound: true })).join("");
+      document.getElementById("revenue-inbound-month-table").innerHTML = revenueTable(inMonthRows, revenueTableRow("Total", it, { inbound: true }, "revenue-total"));
     }
   } catch (e) {
     banner.classList.remove("hidden");
