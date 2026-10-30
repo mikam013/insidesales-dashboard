@@ -281,8 +281,10 @@ def load_dotenv_into_environ():
 
 
 load_dotenv_into_environ()
-API_KEY = os.environ.get("HIGHLEVEL_API_KEY", "")
-LOCATION_ID = os.environ.get("HIGHLEVEL_LOCATION_ID", DEFAULT_LOCATION_ID)
+# Inbound = the main account. The _INBOUND names match the Warm/Cold ones;
+# the old unsuffixed names still work.
+API_KEY = os.environ.get("HIGHLEVEL_API_KEY_INBOUND") or os.environ.get("HIGHLEVEL_API_KEY", "")
+LOCATION_ID = os.environ.get("HIGHLEVEL_LOCATION_ID_INBOUND") or os.environ.get("HIGHLEVEL_LOCATION_ID", DEFAULT_LOCATION_ID)
 COLD_OUTBOUND_API_KEY = os.environ.get("HIGHLEVEL_API_KEY_COLD_OUTBOUND", "")
 COLD_OUTBOUND_LOCATION_ID = os.environ.get("HIGHLEVEL_LOCATION_ID_COLD_OUTBOUND", "")
 WARM_OUTBOUND_API_KEY = os.environ.get("HIGHLEVEL_API_KEY_WARM_OUTBOUND", "")
@@ -2617,7 +2619,7 @@ if __name__ == "__main__":
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"evo-dashboard running on {host}:{port}")
     if not API_KEY:
-        print("WARNING: HIGHLEVEL_API_KEY is not set — API calls will fail until it's added as an env var.")
+        print("WARNING: HIGHLEVEL_API_KEY_INBOUND is not set — API calls will fail until it's added as an env var.")
     else:
         warm_cache()
         prefetch_calls()
