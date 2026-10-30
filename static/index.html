@@ -21,8 +21,7 @@
         <button data-view="sales" class="view-tab">Sales Team Dashboard</button>
         <button data-view="leaderboard" class="view-tab active">Leaderboard</button>
         <button data-view="sales-overview" class="view-tab">Sales Overview</button>
-        <button data-view="cold-outbound" class="view-tab">Cold Outbound</button>
-        <button data-view="inbound-calls" class="view-tab">Inbound Calls</button>
+        <button data-view="commercial" class="view-tab">Commercial</button>
         <button data-view="revenue" class="view-tab">Revenue &amp; ACV</button>
       </nav>
     </div>
@@ -44,6 +43,10 @@
           <button data-range="month" class="range-btn">This Month</button>
         </div>
         <div class="range-col">
+          <button data-range="year" class="range-btn">This Year</button>
+          <button data-range="all" class="range-btn">All Time</button>
+        </div>
+        <div class="range-col range-col-single">
           <span class="custom-range-wrap">
             <button data-range="custom" class="range-btn">Custom</button>
             <div id="calendar-popup" class="calendar-popup hidden">
@@ -67,7 +70,6 @@
               </div>
             </div>
           </span>
-          <button data-range="year" class="range-btn">This Year</button>
         </div>
         <div class="range-col range-col-refresh">
           <button id="refresh-data" class="range-btn">Refresh Data</button>
@@ -163,93 +165,34 @@
       </div>
     </div>
 
+    <div id="view-commercial" class="hidden">
+      <p id="commercial-asof" class="revenue-asof"></p>
+      <div id="commercial-channels" class="dashboard-grid"></div>
+      <p id="commercial-error-banner" class="error hidden"></p>
+    </div>
+
     <div id="view-sales-overview" class="hidden">
-      <p class="placeholder-note">Sales overview data isn't wired up yet — let me know what you'd like to see here.</p>
-    </div>
-
-    <div id="view-cold-outbound" class="hidden">
-      <div class="dashboard-grid">
-        <div class="widget widget-wide cold-outbound-summary">
-          <div id="cold-outbound-kpi-row" class="kpi-row"></div>
-        </div>
-
-        <div class="dashboard-row">
-          <div class="widget">
-            <h2>Sales Rep Call Count</h2>
-            <div id="cold-outbound-chart" class="bar-wrap"></div>
-          </div>
-
-          <div class="widget">
-            <h2>Call Outcome</h2>
-            <div id="cold-outbound-disposition-chart" class="bar-wrap"></div>
-          </div>
-        </div>
-      </div>
-
-      <p id="cold-outbound-error-banner" class="error hidden"></p>
-    </div>
-
-    <div id="view-inbound-calls" class="hidden">
+      <div id="overview-channels" class="dashboard-grid"></div>
       <div class="dashboard-grid">
         <div class="widget widget-wide">
-          <h2>Inbound Leads</h2>
-          <div id="inbound-kpi-row" class="kpi-row"></div>
-        </div>
-
-        <div class="dashboard-row dashboard-row-3">
-          <div class="widget">
-            <h2>Sold Contracts by Sales Rep</h2>
-            <div id="inbound-sold-chart" class="bar-wrap"></div>
-          </div>
-
-          <div class="widget">
-            <h2>Qualified Leads by Rep</h2>
-            <div id="inbound-qualified-chart" class="bar-wrap"></div>
-          </div>
-
-          <div class="widget">
-            <h2>Closed / Qualified by Sales Rep</h2>
-            <div id="inbound-close-rate-chart" class="bar-wrap"></div>
-          </div>
+          <h2>Sales by Channel</h2>
+          <p id="overview-asof" class="revenue-asof"></p>
+          <div id="overview-kpi-row" class="kpi-row"></div>
         </div>
 
         <div class="widget widget-wide">
-          <h2>Inbound Call Activity</h2>
-          <div id="call-log-kpi-row" class="kpi-row"></div>
+          <h2>By Channel</h2>
+          <div id="overview-channel-table" class="call-log-wrap"></div>
         </div>
 
-        <div class="dashboard-row dashboard-row-3">
-          <div class="widget">
-            <h2>Calls Handled By</h2>
-            <div id="call-handler-chart" class="bar-wrap"></div>
-          </div>
-
-          <div class="widget">
-            <h2>Call Type</h2>
-            <div id="call-type-chart" class="bar-wrap"></div>
-          </div>
-
-          <div class="widget">
-            <h2>Sales Call Outcome</h2>
-            <div id="call-outcome-chart" class="bar-wrap"></div>
-          </div>
-        </div>
-
-        <div class="widget widget-wide hidden">
-          <div class="call-log-header">
-            <h2>Call Log</h2>
-            <select id="call-log-filter" class="call-log-filter">
-              <option value="all">All calls</option>
-              <option value="Sales lead">Sales leads only</option>
-              <option value="conversations">Conversations only</option>
-            </select>
-          </div>
-          <div id="call-log-table" class="call-log-wrap"></div>
+        <div class="widget widget-wide">
+          <h2>By Sales Rep</h2>
+          <div id="overview-rep-table" class="call-log-wrap"></div>
         </div>
       </div>
-
-      <p id="inbound-calls-error-banner" class="error hidden"></p>
+      <p id="overview-error-banner" class="error hidden"></p>
     </div>
+
     <div id="view-revenue" class="hidden">
       <div class="dashboard-grid">
         <div class="widget widget-wide">

@@ -5,3 +5,6 @@ __pycache__/
 power_dialer_history.json
 inbound_call_audit.json
 revenue_snapshot.json
+call_cache_*.json
+transcript_checker_seen.json
+inbound_call_audit_auto.json

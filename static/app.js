@@ -1,8 +1,16 @@
 function fmtDate(d) {
-  // Business day is Central Time (matches server's BUSINESS_TZ) — not the
-  // viewer's local clock or UTC, so "Today" clicked in the evening doesn't
-  // roll over to tomorrow's date.
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(d);
+  // Range dates are calendar days built by businessToday() and the date math
+  // below, so format them by their own calendar fields — converting them to
+  // another time zone would shift them a day for viewers outside Central Time.
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function businessToday() {
+  // Business day is Central Time (matches server's BUSINESS_TZ), not the
+  // viewer's clock — e.g. from Manila, "Today" must still be today in Chicago.
+  const [y, m, d] = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(new Date()).split("-").map(Number);
+  return new Date(y, m - 1, d);
 }
 
 function addDays(d, n) {
@@ -33,6 +41,11 @@ function startOfQuarter(d) {
 function startOfYear(d) {
   return new Date(d.getFullYear(), 0, 1);
 }
+
+// Earliest date "All Time" asks for: the oldest HighLevel contact is from
+// Jan 13, 2026 and the first call from Mar 10, 2026. Asking for older empty
+// years only makes the call export crawl through them.
+const ALL_TIME_START = new Date(2026, 0, 1);
 
 function previousPeriodFor(key, start, end) {
   switch (key) {
@@ -98,12 +111,14 @@ function applyRange(rangeKey, start, end) {
 function updateRangeDates() {
   const { start, end } = currentRange;
   const fmt = (d) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
-  document.getElementById("range-dates").textContent = isSameDay(start, end) ? fmt(start) : `${fmt(start)} – ${fmt(end)}`;
+  document.getElementById("range-dates").textContent = currentRangeKey === "all"
+    ? `All time through ${fmt(end)}`
+    : isSameDay(start, end) ? fmt(start) : `${fmt(start)} – ${fmt(end)}`;
 }
 
 // --- Custom range calendar popup ---
 // Calendar dates are local noon so formatting in Central Time never slips a day.
-let calendarViewDate = new Date();
+let calendarViewDate = businessToday();
 let calSelStart = null;
 let calSelEnd = null;
 let calHoverDay = null;
@@ -136,7 +151,7 @@ function showCalendarPopup() {
     calSelEnd = null;
   }
   calHoverDay = null;
-  calendarViewDate = calSelStart ? new Date(calSelStart) : new Date();
+  calendarViewDate = calSelStart ? new Date(calSelStart) : businessToday();
   document.getElementById("calendar-popup").classList.remove("hidden");
   renderCalendar();
 }
@@ -196,7 +211,7 @@ function renderCalendar() {
 function paintCalendar() {
   const hint = document.getElementById("calendar-hint");
   const month = calendarViewDate.getMonth();
-  const today = new Date();
+  const today = businessToday();
 
   if (!calSelStart) hint.textContent = "Pick a start date";
   else if (!calSelEnd) hint.textContent = `From ${shortDate(calSelStart)} – now pick an end date`;
@@ -320,7 +335,7 @@ document.querySelectorAll(".range-btn").forEach((btn) => {
       return;
     }
     hideCalendarPopup();
-    const now = new Date();
+    const now = businessToday();
     if (range === "today") applyRange("today", now, now);
     if (range === "yesterday") applyRange("yesterday", addDays(now, -1), addDays(now, -1));
     if (range === "week") applyRange("week", startOfWeek(now), now);
@@ -328,6 +343,7 @@ document.querySelectorAll(".range-btn").forEach((btn) => {
     if (range === "month") applyRange("month", startOfMonth(now), now);
     if (range === "quarter") applyRange("quarter", startOfQuarter(now), now);
     if (range === "year") applyRange("year", startOfYear(now), now);
+    if (range === "all") applyRange("all", ALL_TIME_START, now);
   });
 });
 
@@ -409,13 +425,15 @@ document.querySelectorAll(".view-tab").forEach((tab) => {
     document.querySelectorAll(".view-tab").forEach((t) => t.classList.remove("active"));
     tab.classList.add("active");
     const view = tab.dataset.view;
-    ["sales", "leaderboard", "sales-overview", "cold-outbound", "inbound-calls", "revenue"].forEach((v) => {
+    ["sales", "leaderboard", "sales-overview", "commercial", "revenue"].forEach((v) => {
       document.getElementById(`view-${v}`).classList.toggle("hidden", view !== v);
     });
     document
       .getElementById("range-toolbar")
-      .classList.toggle("hidden", view !== "sales" && view !== "cold-outbound" && view !== "inbound-calls");
+      .classList.toggle("hidden", !["sales", "sales-overview", "commercial"].includes(view));
     if (view === "leaderboard") loadLeaderboard();
+    if (view === "sales-overview" && currentRange.start) loadSalesOverview(fmtDate(currentRange.start), fmtDate(currentRange.end));
+    if (view === "commercial" && currentRange.start) loadCommercial(fmtDate(currentRange.start), fmtDate(currentRange.end));
     if (view === "revenue") loadRevenue();
   });
 });
@@ -461,6 +479,9 @@ function salesMatching(filter, status) {
     if (filter.rep && s.group !== filter.rep) return false;
     if (filter.month && !s.sold.startsWith(filter.month)) return false;
     if (filter.inbound && !s.inbound) return false;
+    if (filter.channels && !filter.channels.includes(s.channel)) return false;
+    if (filter.start && s.sold < filter.start) return false;
+    if (filter.end && s.sold > filter.end) return false;
     if (status === "serviced") return s.serviced;
     if (status === "servicedActive") return s.serviced && !s.cancelled;
     if (status === "notServiced") return !s.serviced;
@@ -474,6 +495,14 @@ function saleStatusText(s) {
   return s.serviced ? (s.cancelled ? "Serviced, then cancelled" : "Serviced & active") : s.cancelled ? "Cancelled before service" : `Not serviced (${s.initialStatus || "—"})`;
 }
 
+// Customer name → the HighLevel lead the sale was matched to (Mika, 2026-10-27).
+let revenueLocations = {};
+function saleCustomerLink(sale) {
+  const loc = revenueLocations[sale.channel];
+  if (!sale.leadContactId || !loc) return escapeHTML(sale.customer);
+  return `<a class="lead-link" href="${ghlContactUrl(loc, sale.leadContactId)}" target="_blank" rel="noopener">${escapeHTML(sale.customer)}</a>`;
+}
+
 function salesTableHTML(list) {
   return `<table class="deal-table call-log-table">
     <thead><tr><th>Sold</th><th>Customer</th><th>Rep</th><th>Plan</th><th>City</th><th class="num">Contract Value</th><th class="num">ARV</th><th class="num">Months</th><th>Status</th></tr></thead>
@@ -481,7 +510,7 @@ function salesTableHTML(list) {
       .map(
         (s) => `<tr>
           <td class="nowrap">${formatDealDate(s.sold)}</td>
-          <td>${escapeHTML(s.customer)}${s.inbound ? ' <span class="call-pill">Inbound</span>' : ""}</td>
+          <td>${saleCustomerLink(s)}${s.channel || s.inbound ? ` <span class="call-pill">${escapeHTML(s.channel || "Inbound")}</span>` : ""}</td>
           <td class="nowrap">${escapeHTML(s.rep)}</td>
           <td>${escapeHTML(s.plan || "")}</td>
           <td class="nowrap">${escapeHTML(s.city || "")}</td>
@@ -498,7 +527,7 @@ function salesTableHTML(list) {
 function openSalesModal(filter, status) {
   const list = salesMatching(filter, status);
   const total = list.reduce((sum, s) => sum + s.contractValue, 0);
-  const title = [filter.label, filter.inbound ? "Inbound" : null, SALES_STATUS_LABEL[status] || "Closed/Won"].filter(Boolean).join(" — ");
+  const title = [filter.label, filter.inbound && !/Inbound/.test(filter.label) ? "Inbound" : null, SALES_STATUS_LABEL[status] || "Closed/Won"].filter(Boolean).join(" — ");
   document.getElementById("rep-deals-title").textContent = title;
   document.getElementById("rep-deals-body").innerHTML = list.length
     ? `<p class="revenue-asof">${list.length} sales · ${currency(total)} total contract value</p>${salesTableHTML(list)}`
@@ -566,11 +595,291 @@ function renderSalesList() {
 document.getElementById("sales-list-rep").addEventListener("change", renderSalesList);
 document.getElementById("sales-list-status").addEventListener("change", renderSalesList);
 
+// Revenue-row totals (same fields as the snapshot's per rep/month rows) for
+// an arbitrary list of sales, so the Sales Overview can follow the date range.
+function sumSales(list) {
+  const t = sumRevenueRows([]);
+  list.forEach((s) => {
+    const acv = s.contractValue || 0;
+    t.sold += 1;
+    t.acv += acv;
+    t.arv += s.arv || 0;
+    t.initial += s.initial || 0;
+    if (s.frequency !== "-1" && (s.months || 0) > 1) t.recurring += 1;
+    if ((s.months || 0) >= 18) t.multiyear += 1;
+    if (s.months === 18) t.m18 += 1;
+    if (s.months === 24) t.m24 += 1;
+    if (s.cancelled) {
+      t.cancelled += 1;
+      t.cancelledAcv += acv;
+    }
+    if (s.serviced) {
+      t.serviced += 1;
+      t.servicedAcv += acv;
+      if (!s.cancelled) {
+        t.servicedActive += 1;
+        t.servicedActiveAcv += acv;
+      }
+    }
+  });
+  return t;
+}
+
+function durationLabel(seconds) {
+  // Same style as HighLevel's dashboard: 1h 4m 12s / 8m 12s / 45s.
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const sec = Math.round(seconds % 60);
+  return [h ? `${h}h` : "", h || m ? `${m}m` : "", `${sec}s`].filter(Boolean).join(" ");
+}
+
+async function loadCallCount(start, end) {
+  const banner = document.getElementById("call-count-error-banner");
+  banner.classList.add("hidden");
+  const el = document.getElementById("call-count-accounts");
+  try {
+    const data = await fetchJSON(`/api/call-count?start=${start}&end=${end}`);
+    const row = (r, cls = "") =>
+      `<tr class="${cls}"><td class="nowrap">${escapeHTML(r.name)}</td><td class="num">${r.total}</td><td class="num">${r.outbound}</td><td class="num">${r.inbound}</td><td class="num">${r.answered}</td><td class="num">${r.missed}</td><td class="num">${r.busyFailed}</td><td class="num nowrap">${durationLabel(r.durationSeconds)}</td></tr>`;
+    el.innerHTML = data.accounts
+      .map(
+        (a, i) => `
+      <div class="widget widget-wide">
+        <h2 class="channel-title">${escapeHTML(a.name)}</h2>
+        <div class="kpi-row">
+          <div class="kpi-card"><div class="kpi-label">Total Calls</div><div class="kpi-value">${a.total}</div><div class="kpi-small">${a.uniqueContacts} unique contacts</div></div>
+          <div class="kpi-card"><div class="kpi-label">Outgoing</div><div class="kpi-value">${a.outbound}</div><div class="kpi-small">${pctLabel(rate(a.outbound, a.total))} of calls</div></div>
+          <div class="kpi-card"><div class="kpi-label">Incoming</div><div class="kpi-value">${a.inbound}</div><div class="kpi-small">${pctLabel(rate(a.inbound, a.total))} of calls</div></div>
+          <div class="kpi-card"><div class="kpi-label">Answered</div><div class="kpi-value">${a.answered}</div><div class="kpi-small">${a.missed} missed/no answer · ${a.busyFailed} busy/failed</div></div>
+          <div class="kpi-card"><div class="kpi-label">Recorded Call Duration</div><div class="kpi-value">${durationLabel(a.durationSeconds)}</div><div class="kpi-small">avg ${a.total ? durationLabel(a.durationSeconds / a.total) : "0s"} recorded per call</div></div>
+        </div>
+      </div>
+      <div class="dashboard-row call-count-row">
+        <div class="widget"><h2>Calls by Rep</h2><div id="call-count-chart-${i}" class="bar-wrap"></div></div>
+        <div class="widget"><h2>By Rep (Call Attended By)</h2><div class="call-log-wrap"><table class="deal-table call-log-table">
+          <thead><tr><th>&nbsp;</th><th class="num">Total</th><th class="num">Outgoing</th><th class="num">Incoming</th><th class="num">Answered</th><th class="num">Missed</th><th class="num">Busy/Failed</th><th class="num">Recorded Duration</th></tr></thead>
+          <tbody>${a.byRep.map((r) => row(r)).join("")}${row({ ...a, name: "Total" }, "revenue-total")}</tbody>
+        </table></div></div>
+      </div>`
+      )
+      .join("");
+    data.accounts.forEach((a, i) =>
+      renderBarChart(`call-count-chart-${i}`, a.byRep.length ? a.byRep : [{ name: "No calls", total: 0 }], {
+        valueOf: (r) => r.total,
+        formatValue: (item) => `${item.value}`,
+        onClick: (r) => r.name !== "No calls" && openChartLeads("cc-calls", r.name, a.name),
+      })
+    );
+  } catch (e) {
+    banner.classList.remove("hidden");
+    banner.textContent = `Call count: ${e.message}`;
+  }
+}
+
+const OUTBOUND_CHANNELS = ["Warm Outbound", "Cold Outbound"];
+
+function closeRateLabel(rate) {
+  // Over 100% means the qualification field isn't being filled in for this
+  // channel, so the rate says nothing — show a dash instead.
+  return rate === null || rate > 100 ? "—" : `${rate}%`;
+}
+
+// Latest requested range per section: a slow answer for an older range must not
+// overwrite the newer one when the user switches dates quickly (Mika, 2026-10-27).
+const latestFunnelRequest = {};
+
+async function loadChannelFunnels(start, end) {
+  const key = `${start}|${end}`;
+  latestFunnelRequest.overview = key;
+  const data = await fetchJSON(`/api/sales-overview?start=${start}&end=${end}`);
+  if (latestFunnelRequest.overview !== key) return;
+  renderChannelFunnels(document.getElementById("overview-channels"), data.channels, "overview");
+}
+
+async function loadCommercial(start, end) {
+  const banner = document.getElementById("commercial-error-banner");
+  banner.classList.add("hidden");
+  try {
+    const key = `${start}|${end}`;
+    latestFunnelRequest.commercial = key;
+    const data = await fetchJSON(`/api/commercial?start=${start}&end=${end}`);
+    if (latestFunnelRequest.commercial !== key) return;
+    document.getElementById("commercial-asof").textContent =
+      `Main-account leads with Property Type = Commercial (${data.taggedCommercial} tagged so far). They're left out of every other tab. FieldRoutes data through ${formatDealDate(data.dataThrough)}.`;
+    renderChannelFunnels(document.getElementById("commercial-channels"), data.channels, "commercial");
+  } catch (e) {
+    banner.classList.remove("hidden");
+    banner.textContent = `Commercial: ${e.message}`;
+  }
+}
+
+function renderChannelFunnels(el, channels, prefix) {
+  // Inbound (and Commercial) track qualified leads; Warm Outbound shows leads
+  // received by lead type; Cold Outbound shows calls made (Mika, 2026-10-26).
+  const kpi = (label, value, small) => `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value">${value}</div><div class="kpi-small">${small}</div></div>`;
+  const byType = (ch, f) => (ch.leadTypes || []).map((t) => `${escapeHTML(t.name)}: ${f(t)}`).join("<br>");
+  // Inbound, Warm and Cold Outbound titles get a full-width green band (Mika, 2026-10-27).
+  const titleClass = (ch) => ["Inbound", "Warm Outbound", "Cold Outbound"].includes(ch.name) ? "channel-title channel-title-band" : "channel-title";
+  const block = (ch, i) => {
+    if (ch.name === "Warm Outbound") {
+      return `
+      <div class="widget widget-wide">
+        <h2 class="${titleClass(ch)}">${escapeHTML(ch.name)}</h2>
+        <div class="kpi-row">
+          ${kpi("Leads Received", ch.leads, byType(ch, (t) => t.leads))}
+          ${kpi("Sales", ch.frCount, byType(ch, (t) => t.frCount))}
+          ${kpi("Contract Value", currency(ch.frAcv), byType(ch, (t) => currency(t.frAcv)))}
+        </div>
+      </div>
+      <div class="dashboard-row dashboard-row-3">
+        <div class="widget"><h2>Leads Received by Type</h2><div id="${prefix}-types-${i}" class="bar-wrap"></div></div>
+        <div class="widget"><h2>Sales by Lead Type</h2><div id="${prefix}-typesales-${i}" class="bar-wrap"></div></div>
+        <div class="widget"><h2>Sold Contracts by Sales Rep</h2><div id="${prefix}-sold-${i}" class="bar-wrap"></div></div>
+      </div>`;
+    }
+    if (ch.name === "Cold Outbound") {
+      return `
+      <div class="widget widget-wide">
+        <h2 class="${titleClass(ch)}">${escapeHTML(ch.name)}</h2>
+        <div class="kpi-row">
+          ${kpi("Calls Made", ch.callsMade ?? "—", "outgoing calls in this period")}
+          ${kpi("Sales", ch.frCount, "sold in this period")}
+          ${kpi("Contract Value", currency(ch.frAcv), "total contract value")}
+        </div>
+      </div>
+      <div class="dashboard-row">
+        <div class="widget"><h2>Calls Made by Rep</h2><div id="${prefix}-calls-${i}" class="bar-wrap"></div></div>
+        <div class="widget"><h2>Sold Contracts by Sales Rep</h2><div id="${prefix}-sold-${i}" class="bar-wrap"></div></div>
+      </div>`;
+    }
+    const fixed = ch.qualified < ch.frCount;
+    return `
+      <div class="widget widget-wide">
+        <h2 class="${titleClass(ch)}">${escapeHTML(ch.name)}</h2>
+        ${ch.olderSources && ch.olderSources.count ? `<p class="revenue-asof">Plus ${ch.olderSources.count} sales (${currency(ch.olderSources.acv)}) from leads with older inbound sources (Yelp, GMB, LSA, Field Routes, truck numbers, no source) — not counted in the close rate.</p>` : ""}
+        ${fixed ? `<p class="revenue-asof">Fewer leads are marked Qualified than were sold, so close rates aren't shown — the qualification field isn't being filled in for most ${escapeHTML(ch.name)} leads.</p>` : ""}
+        <div class="kpi-row">
+          ${kpi("Leads", ch.leads, "added in this period")}
+          ${kpi("Qualified Leads", pctLabel(rate(ch.qualified, ch.leads)), `${ch.qualified} qualified`)}
+          ${kpi("Sales", ch.frCount, "sold in this period")}
+          ${kpi("Contract Value", currency(ch.frAcv), "total contract value")}
+          ${kpi("Close Rate", closeRateLabel(ch.frCloseRate), `${ch.frCount} sales / ${ch.qualified} qualified`)}
+        </div>
+      </div>
+      <div class="dashboard-row dashboard-row-3">
+        <div class="widget"><h2>Sold Contracts by Sales Rep</h2><div id="${prefix}-sold-${i}" class="bar-wrap"></div></div>
+        <div class="widget"><h2>Qualified Leads by Rep</h2><div id="${prefix}-qualified-${i}" class="bar-wrap"></div></div>
+        <div class="widget"><h2>Closed / Qualified by Sales Rep</h2><div id="${prefix}-close-${i}" class="bar-wrap"></div></div>
+      </div>`;
+  };
+  el.innerHTML = channels.map(block).join("");
+  channels.forEach((ch, i) => {
+    renderBarChart(`${prefix}-sold-${i}`, ch.reps, {
+      onClick: (r) => openChartLeads("ov-sold", r.name, ch.name),
+      valueOf: (r) => r.frCount,
+      formatValue: (item) => `${item.value}`,
+    });
+    if (ch.name === "Warm Outbound") {
+      renderBarChart(`${prefix}-types-${i}`, ch.leadTypes, {
+        valueOf: (t) => t.leads,
+        formatValue: (item) => `${item.value}`,
+        onClick: (t) => openChartLeads("ov-types", t.name, ch.name),
+      });
+      renderBarChart(`${prefix}-typesales-${i}`, ch.leadTypes, {
+        onClick: (t) => openChartLeads("ov-typesales", t.name, ch.name),
+        valueOf: (t) => t.frCount,
+        formatValue: (item) => `${item.value}`,
+      });
+      return;
+    }
+    if (ch.name === "Cold Outbound") {
+      renderBarChart(`${prefix}-calls-${i}`, ch.callsByRep && ch.callsByRep.length ? ch.callsByRep : [{ name: "No calls", calls: 0 }], {
+        valueOf: (r) => r.calls,
+        onClick: (r) => r.name !== "No calls" && openChartLeads("ov-calls", r.name, ch.name),
+        formatValue: (item) => `${item.value}`,
+      });
+      return;
+    }
+    renderBarChart(`${prefix}-qualified-${i}`, ch.reps, {
+      onClick: (r) => openChartLeads("ov-qualified", r.name, ch.name),
+      valueOf: (r) => r.qualified,
+      formatValue: (item) => `${item.value}`,
+    });
+    renderBarChart(`${prefix}-close-${i}`, ch.reps, {
+      onClick: (r) => openChartLeads("ov-close", r.name, ch.name),
+      valueOf: (r) => (r.frCloseRate !== null && r.frCloseRate <= 100 ? r.frCloseRate : 0),
+      formatValue: (item) => closeRateLabel(item.rep.frCloseRate),
+      referenceLineAt: 100,
+      referenceLabel: "100%",
+    });
+  });
+}
+
+async function loadSalesOverview(start, end) {
+  const banner = document.getElementById("overview-error-banner");
+  banner.classList.add("hidden");
+  loadChannelFunnels(start, end).catch((e) => {
+    banner.classList.remove("hidden");
+    banner.textContent = `Sales overview: ${e.message}`;
+  });
+  try {
+    const key = `${start}|${end}`;
+    latestFunnelRequest.overviewTables = key;
+    const data = await fetchJSON("/api/revenue-snapshot");
+    revenueLocations = data.locations || revenueLocations;
+    if (latestFunnelRequest.overviewTables !== key) return;
+    revenueSales = data.sales || [];
+    // Commercial sales live on the Commercial tab only.
+    const inRange = revenueSales.filter((s) => s.sold >= start && s.sold <= end && s.channel !== "Commercial");
+    const of = (list, channels) => list.filter((s) => channels.includes(s.channel));
+    const all = sumSales(inRange);
+    const groups = [
+      { label: "Inbound", channels: ["Inbound"] },
+      { label: "Outbound", channels: OUTBOUND_CHANNELS, subtotal: true },
+      { label: "Outbound — Warm", channels: ["Warm Outbound"] },
+      { label: "Outbound — Cold", channels: ["Cold Outbound"] },
+      { label: "Not matched to a lead", channels: ["Not matched"] },
+    ];
+    const notes = [`${data.reps.join(" + ")} · FieldRoutes sales credited by Sold By`];
+    if (data.othersNote) notes.push(data.othersNote);
+    notes.push(
+      "Channel = the HighLevel account of the most recent lead with the same phone/email that came in on or before the sale: Inbound (main account, any source), Warm Outbound or Cold Outbound (those sub-accounts)"
+    );
+    if (start < "2026-05-01") notes.push("FieldRoutes sales start May 1, 2026");
+    notes.push(`FieldRoutes data through ${formatDealDate(data.dataThrough)}`);
+    document.getElementById("overview-asof").textContent = notes.join(" · ");
+    const card = (label, t) =>
+      `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value">${t.sold}</div><div class="kpi-small">${currency(t.acv)} total contract value<br>${t.sold ? currency(t.acv / t.sold) : "$0"} avg contract value${label === "All Sales" ? "" : ` · ${pctLabel(rate(t.sold, all.sold))} of sales`}</div></div>`;
+    document.getElementById("overview-kpi-row").innerHTML =
+      card("All Sales", all) +
+      groups.map((g) => card(g.label, sumSales(of(inRange, g.channels)))).join("");
+    const range = { start, end };
+    const rowsFor = (list, extra, prefix) =>
+      groups
+        .map((g) =>
+          revenueTableRow(prefix ? `${prefix} — ${g.label}` : g.label, sumSales(of(list, g.channels)), { ...range, ...extra, channels: g.channels }, g.subtotal ? "revenue-subtotal" : "")
+        )
+        .join("");
+    document.getElementById("overview-channel-table").innerHTML = revenueTable(rowsFor(inRange, {}), revenueTableRow("Total", all, range, "revenue-total"));
+    const repRows = data.reps
+      .map((rep) => {
+        const mine = inRange.filter((s) => s.group === rep);
+        return rowsFor(mine, { rep }, rep) + revenueTableRow(`${rep} — Total`, sumSales(mine), { ...range, rep }, "revenue-total");
+      })
+      .join("");
+    document.getElementById("overview-rep-table").innerHTML = revenueTable(repRows, revenueTableRow("Team", all, range, "revenue-total"));
+  } catch (e) {
+    banner.classList.remove("hidden");
+    banner.textContent = `Sales overview: ${e.message}`;
+  }
+}
+
 async function loadRevenue() {
   const banner = document.getElementById("revenue-error-banner");
   banner.classList.add("hidden");
   try {
     const data = await fetchJSON("/api/revenue-snapshot");
+    revenueLocations = data.locations || revenueLocations;
     const team = sumRevenueRows(data.rows);
     document.getElementById("revenue-title").textContent = `${data.periodLabel || "2026 Year to Date"} — Inside Sales`;
     document.getElementById("revenue-asof").textContent =
@@ -773,6 +1082,7 @@ function renderSources(curr, prev) {
     count: curr.totals.sources[name] || 0,
   }));
   renderBarChart("sources-chart", items, {
+    onClick: (r) => openChartLeads("team-sources", r.name),
     valueOf: (r) => r.count,
     formatValue: (item) => `${item.value}`,
   });
@@ -786,6 +1096,7 @@ function renderClosedSources(curr, prev) {
     count: curr.totals.closedSources[name] || 0,
   }));
   renderBarChart("closed-sources-chart", items, {
+    onClick: (r) => openChartLeads("team-closed-sources", r.name),
     valueOf: (r) => r.count,
     formatValue: (item) => `${item.value} sold`,
     showDelta: true,
@@ -793,7 +1104,7 @@ function renderClosedSources(curr, prev) {
 }
 
 function rangeForLeaderboard(key) {
-  const now = new Date();
+  const now = businessToday();
   if (key === "week") return { start: startOfWeek(now), end: now };
   if (key === "month") return { start: startOfMonth(now), end: now };
   return { start: now, end: now };
@@ -886,6 +1197,57 @@ const barChartObserver = new ResizeObserver((entries) => {
   });
 });
 
+function renderHorizontalBars(el, items, opts, width) {
+  const rowH = 30, gap = 8, top = items.some((i) => i.previousValue !== null && i.value > 0) ? 26 : 6;
+  // Label column sized to the longest name (≈7px per character at 13px), capped at 45% of the width.
+  const CHAR_W = 7.1;
+  const longest = Math.max(...items.map((i) => i.label.length));
+  const labelW = Math.round(Math.min(width * 0.45, Math.max(70, longest * CHAR_W + 8)));
+  const maxChars = Math.max(6, Math.floor((labelW - 6) / CHAR_W));
+  const valueW = 70;
+  const barX = labelW + 12;
+  const barMax = Math.max(40, width - barX - valueW - 8);
+  const height = top + items.length * (rowH + gap) + 4;
+  const rawMax = Math.max(1, ...items.map((i) => i.value), ...items.map((i) => i.previousValue || 0), opts.referenceLineAt || 0);
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height, class: "bar-chart bar-chart-h" });
+  if (opts.referenceLineAt) {
+    const rx = barX + (opts.referenceLineAt / rawMax) * barMax;
+    svg.appendChild(svgEl("line", { x1: rx, x2: rx, y1: top - 4, y2: height - 4, class: "bar-ref-line" }));
+  }
+  items.forEach((item, i) => {
+    const y = top + i * (rowH + gap);
+    const g = svgEl("g", { class: "bar-group" });
+    const label = svgEl("text", { x: labelW, y: y + rowH / 2 + 5, "text-anchor": "end", class: "bar-name-label" });
+    label.textContent = item.label.length > maxChars ? item.label.slice(0, maxChars - 1) + "…" : item.label;
+    const title = svgEl("title", {});
+    title.textContent = item.label;
+    label.appendChild(title);
+    g.appendChild(label);
+    if (item.previousValue !== null && item.value > 0) {
+      g.appendChild(svgEl("rect", { x: barX, y: y + 2, width: Math.max((item.previousValue / rawMax) * barMax, 0), height: rowH - 4, rx: 6, class: "bar-ghost-rect" }));
+    }
+    const w = (item.value / rawMax) * barMax;
+    g.appendChild(svgEl("rect", { x: barX, y: y + 4, width: Math.max(w, item.value > 0 ? 3 : 0), height: rowH - 8, rx: 6, fill: "#2f9e3a", class: "bar-fill-rect" }));
+    const val = svgEl("text", { x: barX + Math.max(w, (item.previousValue !== null && item.value > 0 ? (item.previousValue / rawMax) * barMax : 0)) + 8, y: y + rowH / 2 + 5, class: "bar-value-label bar-value-label-h" });
+    val.textContent = opts.formatValue(item);
+    g.appendChild(val);
+    if (opts.onClick) {
+      const hit = svgEl("rect", { x: 0, y, width, height: rowH, fill: "transparent", class: "bar-hit-rect" });
+      hit.addEventListener("click", () => opts.onClick(item.rep));
+      g.appendChild(hit);
+    }
+    svg.appendChild(g);
+  });
+  if (items.some((i) => i.previousValue !== null && i.value > 0)) {
+    const lx = width - 110;
+    svg.appendChild(svgEl("rect", { x: lx, y: 4, width: 12, height: 12, rx: 3, class: "bar-ghost-rect" }));
+    const lt = svgEl("text", { x: lx + 18, y: 14, class: "bar-ref-label" });
+    lt.textContent = "Previous period";
+    svg.appendChild(lt);
+  }
+  el.appendChild(svg);
+}
+
 function renderBarChart(containerId, reps, opts) {
   const el = document.getElementById(containerId);
   el.innerHTML = "";
@@ -900,6 +1262,19 @@ function renderBarChart(containerId, reps, opts) {
       previousValue: r._prev ? opts.valueOf(r._prev) || 0 : null,
     }))
     .sort((a, b) => b.value - a.value);
+
+  // Many bars or long names overlap as columns, so those charts are drawn as
+  // horizontal rows instead (Mika: "fix the visuals", 2026-10-27).
+  const probeWidth = Math.max(320, Math.round(el.clientWidth) || 640);
+  const probeBar = (probeWidth - 40 - 32 * (items.length - 1)) / Math.max(1, items.length);
+  const crowded =
+    items.length > 5 ||
+    (probeWidth < 460 && items.length > 3) ||
+    items.some((it) => wrapBarLabel(it.label, Math.max(6, Math.floor(probeBar / 8))).length > 2);
+  if (crowded && !opts.vertical) {
+    renderHorizontalBars(el, items, opts, probeWidth);
+    return;
+  }
 
   const width = Math.max(320, Math.round(el.clientWidth) || 640);
   const padding = { top: opts.showDelta ? 58 : 36, right: 20, bottom: 40, left: 20 };
@@ -1025,6 +1400,83 @@ function formatDealDate(isoDate) {
   return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+// --- Chart drill-down: click a bar → the leads behind it, each linking to HighLevel.
+const ghlContactUrl = (locationId, contactId) =>
+  `https://app.gohighlevel.com/v2/location/${locationId}/contacts/detail/${contactId}`;
+
+function renderLeadRows(rows, emptyText) {
+  if (!rows.length) return `<p class="deal-table-empty">${escapeHTML(emptyText || "No leads for this bar in this date range.")}</p>`;
+  const body = rows
+    .map((r) => {
+      const name = escapeHTML(r.name || "Unnamed");
+      const link = r.contactId && r.locationId
+        ? `<a class="lead-link" href="${ghlContactUrl(r.locationId, r.contactId)}" target="_blank" rel="noopener">${name}</a>`
+        : name;
+      const detail = r.detail ? `<div class="lead-detail">${escapeHTML(r.detail)}</div>` : "";
+      return `<tr><td>${link}${detail}</td><td class="nowrap lead-date">${r.date ? formatDealDate(r.date) : ""}</td></tr>`;
+    })
+    .join("");
+  return `<p class="lead-count">${rows.length} lead${rows.length === 1 ? "" : "s"} · click a name to open it in HighLevel</p>
+    <table class="deal-table lead-table"><thead><tr><th>Lead</th><th class="lead-date">Date</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function showLeadsModal(title, html) {
+  document.getElementById("rep-deals-title").textContent = title;
+  document.getElementById("rep-deals-body").innerHTML = html;
+  document.getElementById("rep-deals-modal").classList.remove("hidden");
+}
+
+let chartLeadsToken = 0;
+// period: "current" or "previous" (the outline bars when "Compare to previous period" is on).
+async function openChartLeads(chart, key, channel, period = "current") {
+  const token = ++chartLeadsToken;
+  const compare = document.getElementById("compare-checkbox").checked;
+  let range = { start: currentRange.start, end: currentRange.end };
+  if (period === "previous") range = previousPeriodFor(currentRangeKey, currentRange.start, currentRange.end);
+  const fmtShort = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const label = (r) => (isSameDay(r.start, r.end) ? fmtShort(r.start) : `${fmtShort(r.start)} – ${fmtShort(r.end)}`);
+  let toggle = "";
+  if (compare) {
+    const prev = previousPeriodFor(currentRangeKey, currentRange.start, currentRange.end);
+    const btn = (p, text, r) =>
+      `<button class="period-btn${p === period ? " active" : ""}" data-period="${p}">${text}<span>${label(r)}</span></button>`;
+    toggle = `<div class="period-toggle">${btn("current", "This period", currentRange)}${btn("previous", "Previous period", prev)}</div>`;
+  }
+  const wire = () =>
+    document.querySelectorAll("#rep-deals-body .period-btn").forEach((b) =>
+      b.addEventListener("click", () => openChartLeads(chart, key, channel, b.dataset.period))
+    );
+  showLeadsModal(`${key}`, `${toggle}<p class="deal-table-empty">Loading…</p>`);
+  wire();
+  try {
+    const q = new URLSearchParams({ chart, key, start: fmtDate(range.start), end: fmtDate(range.end) });
+    if (channel) q.set("channel", channel);
+    const data = await fetchJSON(`/api/chart-leads?${q}`);
+    if (token !== chartLeadsToken) return;
+    showLeadsModal(data.title + (period === "previous" ? " (previous period)" : ""), toggle + renderLeadRows(data.rows));
+    wire();
+  } catch (e) {
+    if (token !== chartLeadsToken) return;
+    showLeadsModal(key, `${toggle}<p class="deal-table-empty">Failed to load: ${escapeHTML(e.message)}</p>`);
+    wire();
+  }
+}
+
+// Inbound call log charts: the calls are already on the page, so filter them here.
+function openCallLogLeads(field, label, title) {
+  if (!callLogData) return;
+  // Same rule as the chart: only audited calls are counted.
+  const calls = callLogData.calls.filter((c) => c.audited && ((c[field] ?? null) === null ? "—" : c[field]) === label);
+  const seen = new Map();
+  calls.forEach((c) => {
+    const k = c.contactId || c.name;
+    if (!seen.has(k)) seen.set(k, { name: c.name, contactId: c.contactId, locationId: callLogData.locationId, detail: [c.callType, c.outcome].filter((x) => x && x !== "N/A").join(" · "), date: c.date, n: 0 });
+    seen.get(k).n += 1;
+  });
+  const rows = [...seen.values()].map((r) => ({ ...r, detail: `${r.n} call${r.n === 1 ? "" : "s"}${r.detail ? " · " + r.detail : ""}` }));
+  showLeadsModal(`${title} — ${label}`, renderLeadRows(rows));
+}
+
 function closeRepDealsModal() {
   document.getElementById("rep-deals-modal").classList.add("hidden");
 }
@@ -1125,6 +1577,7 @@ function renderColdOutbound(data) {
   `;
 
   renderBarChart("cold-outbound-chart", callers, {
+    onClick: (r) => openChartLeads("co-callers", r.name),
     valueOf: (r) => r.count,
     formatValue: (item) => `${item.value}`,
   });
@@ -1132,6 +1585,7 @@ function renderColdOutbound(data) {
   const dispoCounts = data.dispositionCounts.counts || {};
   const dispositions = Object.keys(dispoCounts).map((name) => ({ name, count: dispoCounts[name] }));
   renderBarChart("cold-outbound-disposition-chart", dispositions, {
+    onClick: (r) => openChartLeads("co-dispositions", r.name),
     valueOf: (r) => r.count,
     formatValue: (item) => `${item.value}`,
   });
@@ -1160,14 +1614,15 @@ async function loadInboundCalls(start, end) {
     renderBarChart("inbound-sold-chart", data.reps, {
       valueOf: (r) => r.closedCount,
       formatValue: (item) => `${item.value} sold`,
-      onClick: (rep) => openRepDealsModal(rep.name, "/api/inbound-rep-deals"),
+      onClick: (rep) => openChartLeads("inbound-deals", rep.name),
     });
     renderBarChart("inbound-qualified-chart", data.reps, {
       valueOf: (r) => r.qualifiedLeads,
       formatValue: (item) => `${item.value}`,
-      onClick: (rep) => openQualifiedLeadsModal(rep.name),
+      onClick: (rep) => openChartLeads("inbound-qualified", rep.name),
     });
     renderBarChart("inbound-close-rate-chart", data.reps, {
+      onClick: (rep) => openChartLeads("inbound-close", rep.name),
       valueOf: (r) => r.qualifiedCloseRate || 0,
       formatValue: (item) => (item.rep.qualifiedCloseRate !== null ? `${item.rep.qualifiedCloseRate}%` : "—"),
       referenceLineAt: 100,
@@ -1232,7 +1687,6 @@ function renderCallLogTable() {
   `;
 }
 
-document.getElementById("call-log-filter").addEventListener("change", renderCallLogTable);
 
 async function loadInboundCallLog(start, end) {
   const banner = document.getElementById("inbound-calls-error-banner");
@@ -1248,11 +1702,15 @@ async function loadInboundCallLog(start, end) {
       <div class="kpi-card"><div class="kpi-label">Qualified</div><div class="kpi-value">${data.qualified}</div><div class="kpi-small">${pctLabel(rate(data.qualified, data.salesLeads))} of sales leads</div></div>
       <div class="kpi-card"><div class="kpi-label">Sold on the Call</div><div class="kpi-value">${data.sold}</div><div class="kpi-small">${pctLabel(rate(data.sold, data.qualified))} of qualified</div></div>
     `;
-    const countChart = (id, counts) =>
-      renderBarChart(id, countsToBars(counts), { valueOf: (r) => r.count, formatValue: (item) => `${item.value}` });
-    countChart("call-handler-chart", data.byHandler);
-    countChart("call-type-chart", data.byCallType);
-    countChart("call-outcome-chart", data.byOutcome);
+    const countChart = (id, counts, field, title) =>
+      renderBarChart(id, countsToBars(counts), {
+        valueOf: (r) => r.count,
+        formatValue: (item) => `${item.value}`,
+        onClick: (r) => openCallLogLeads(field, r.name, title),
+      });
+    countChart("call-handler-chart", data.byHandler, "handledBy", "Handled By");
+    countChart("call-type-chart", data.byCallType, "callType", "Call Type");
+    countChart("call-outcome-chart", data.byOutcome, "outcome", "Outcome");
     renderCallLogTable();
   } catch (e) {
     banner.classList.remove("hidden");
@@ -1279,9 +1737,8 @@ async function loadData() {
   const compareEnabled = document.getElementById("compare-checkbox").checked;
 
   loadPowerDialer(start, end); // fire independently — can be slow on a cold cache, shouldn't block the rest
-  loadColdOutbound(start, end); // fire independently — same reasoning
-  loadInboundCalls(start, end); // fire independently — same reasoning
-  loadInboundCallLog(start, end); // fire independently — same reasoning
+  loadSalesOverview(start, end); // fire independently — same reasoning
+  loadCommercial(start, end);
 
   try {
     let curr;
@@ -1310,22 +1767,24 @@ async function loadData() {
       valueOf: (r) => r.closedCount,
       formatValue: (item) => `${item.value} sold`,
       showDelta: true,
-      onClick: (rep) => openRepDealsModal(rep.name),
+      onClick: (rep) => openChartLeads("team-deals", rep.name),
     });
 
     renderBarChart("sales-share", repsWithPrev, {
       valueOf: (r) => r.closedValue,
       formatValue: (item) => `${currency(item.value)} (${item.rep.pctOfTotal}%)`,
       showDelta: true,
-      onClick: (rep) => openRepDealsModal(rep.name),
+      onClick: (rep) => openChartLeads("team-deals", rep.name),
     });
 
     renderBarChart("qualified-leads-chart", repsWithPrev, {
       valueOf: (r) => r.qualifiedLeads,
       formatValue: (item) => `${item.value}`,
+      onClick: (rep) => openChartLeads("team-qualified", rep.name),
     });
 
     renderBarChart("close-rate-chart", repsWithPrev, {
+      onClick: (rep) => openChartLeads("team-close", rep.name),
       valueOf: (r) => r.closeRate || 0,
       formatValue: (item) => (item.rep.closeRate !== null ? `${item.rep.closeRate}%` : "—"),
       referenceLineAt: 100,
@@ -1341,5 +1800,5 @@ async function loadData() {
 
 // default to today on load
 setActiveButton("today");
-applyRange("today", new Date(), new Date());
+applyRange("today", businessToday(), businessToday());
 loadLeaderboard();
