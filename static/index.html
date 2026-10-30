@@ -19,8 +19,8 @@
       </div>
       <nav class="view-tabs">
         <button data-view="sales" class="view-tab">Sales Team Dashboard</button>
-        <button data-view="leaderboard" class="view-tab active">Leaderboard</button>
-        <button data-view="sales-overview" class="view-tab">Sales Overview</button>
+        <button data-view="leaderboard" class="view-tab">Leaderboard</button>
+        <button data-view="sales-overview" class="view-tab active">Sales Overview</button>
         <button data-view="commercial" class="view-tab">Commercial</button>
         <button data-view="revenue" class="view-tab">Revenue &amp; ACV</button>
       </nav>
@@ -28,7 +28,7 @@
   </header>
 
   <main>
-    <div id="range-toolbar" class="toolbar hidden">
+    <div id="range-toolbar" class="toolbar">
       <div class="range-controls">
         <div class="range-col">
           <button data-range="today" class="range-btn">Today</button>
@@ -88,30 +88,22 @@
     <div id="view-sales" class="hidden">
       <div class="dashboard-grid">
         <div class="widget widget-wide">
-          <h2>Overview</h2>
-          <div id="kpi-row-top" class="kpi-row"></div>
+          <h2>Sales Team Overview</h2>
+          <div id="kpi-row" class="kpi-row team-kpi-row"></div>
+        </div>
+        <div id="kpi-row-top" class="hidden"></div>
+
+        <!-- Lead Sources removed (Mika, 2026-10-30) -->
+        <div class="widget widget-wide hidden">
+          <h2>Lead Sources</h2>
+          <div id="sources-chart" class="bar-wrap"></div>
         </div>
 
-        <div class="widget widget-wide">
-          <h2>Leads</h2>
-          <div class="widget-split">
-            <div id="kpi-row" class="kpi-row"></div>
-            <div class="widget-split-col">
-              <h3 class="chart-label">Lead Sources</h3>
-              <div id="sources-chart" class="bar-wrap"></div>
-            </div>
-          </div>
-        </div>
+        <!-- Powerdialer section removed (Mika, 2026-10-30) -->
+        <div id="power-dialer-row" class="hidden"></div>
 
-        <div class="widget widget-wide">
-          <h2>Powerdialer</h2>
-          <div id="power-dialer-row" class="kpi-row">
-            <div class="kpi-card"><div class="kpi-label">Leads Called</div><div class="kpi-value">…</div></div>
-            <div class="kpi-card"><div class="kpi-label">Leads Closed</div><div class="kpi-value">…</div></div>
-          </div>
-        </div>
-
-        <div class="dashboard-row dashboard-row-3">
+        <!-- All five charts on one line (Mika, 2026-10-30) -->
+        <div class="dashboard-row dashboard-row-5">
           <div class="widget">
             <h2>Sold Contracts by Sales Rep</h2>
             <div id="sold-services-chart" class="bar-wrap"></div>
@@ -123,28 +115,39 @@
           </div>
 
           <div class="widget">
-            <h2>Sold Contracts by Lead Source</h2>
+            <h2>Sold Contracts by Channel</h2>
             <div id="closed-sources-chart" class="bar-wrap"></div>
           </div>
-        </div>
 
-        <div class="dashboard-row">
           <div class="widget">
-            <h2>Qualified Leads by Rep</h2>
+            <h2>Qualified Leads by Rep (Inbound)</h2>
             <div id="qualified-leads-chart" class="bar-wrap"></div>
           </div>
 
           <div class="widget">
-            <h2>Closed Rate by Sales Rep</h2>
+            <h2>Close Rate by Sales Rep (Inbound)</h2>
             <div id="close-rate-chart" class="bar-wrap"></div>
           </div>
+        </div>
+      </div>
+
+      <!-- FieldRoutes sales by channel and rep removed; same sales as the charts above (Mika, 2026-10-30) -->
+      <div class="dashboard-grid hidden">
+        <div class="widget widget-wide">
+          <h2>FieldRoutes Sales by Channel</h2>
+          <div id="overview-channel-table" class="call-log-wrap"></div>
+        </div>
+
+        <div class="widget widget-wide">
+          <h2>FieldRoutes Sales by Sales Rep</h2>
+          <div id="overview-rep-table" class="call-log-wrap"></div>
         </div>
       </div>
 
       <p id="error-banner" class="error hidden"></p>
     </div>
 
-    <div id="view-leaderboard">
+    <div id="view-leaderboard" class="hidden">
       <div class="dashboard-grid">
         <div class="widget widget-wide leaderboard-today-widget">
           <h2>Today</h2>
@@ -171,24 +174,16 @@
       <p id="commercial-error-banner" class="error hidden"></p>
     </div>
 
-    <div id="view-sales-overview" class="hidden">
+    <div id="view-sales-overview">
       <div id="overview-channels" class="dashboard-grid"></div>
       <div class="dashboard-grid">
-        <div class="widget widget-wide">
+        <!-- Sales by Channel cards removed (Mika, 2026-10-30) -->
+        <div class="widget widget-wide hidden">
           <h2>Sales by Channel</h2>
           <p id="overview-asof" class="revenue-asof"></p>
           <div id="overview-kpi-row" class="kpi-row"></div>
         </div>
 
-        <div class="widget widget-wide">
-          <h2>By Channel</h2>
-          <div id="overview-channel-table" class="call-log-wrap"></div>
-        </div>
-
-        <div class="widget widget-wide">
-          <h2>By Sales Rep</h2>
-          <div id="overview-rep-table" class="call-log-wrap"></div>
-        </div>
       </div>
       <p id="overview-error-banner" class="error hidden"></p>
     </div>
@@ -231,7 +226,7 @@
         </div>
 
         <div class="widget widget-wide">
-          <h2>Inbound Leads &mdash; Sales in Revhawk</h2>
+          <h2>Inbound Leads &mdash; Sales in FieldRoutes</h2>
           <p id="revenue-inbound-note" class="revenue-asof"></p>
           <div id="revenue-inbound-kpi-row" class="kpi-row"></div>
           <div id="revenue-inbound-rep-table" class="call-log-wrap"></div>

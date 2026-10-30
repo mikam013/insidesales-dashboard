@@ -139,6 +139,46 @@ def _name_key(name):
 WARM_LEAD_SOURCES = re.compile(r"^(website form|meta ads|paid social|snoball referral|contact us form)", re.I)
 
 
+def with_rep_names(snapshot):
+    # FieldRoutes sales by the rep's own name, never "Others"; James Graham Jr.
+    # only counts from his start date (Mika, 2026-10-30). Rows and rep lists are
+    # rebuilt so a rep only appears in months where they sold something.
+    out = copy.deepcopy(snapshot)
+    sales = []
+    for sale in out.get("sales") or []:
+        name = sale.get("rep") or sale.get("group")
+        if name in REP_START and sale["sold"] < REP_START[name]:
+            continue
+        sale["group"] = name
+        sales.append(sale)
+    out["sales"] = sales
+    out["rows"] = revenue_rows(sales)
+    sold_by = {r["rep"] for r in out["rows"]}
+    order = CORE_REPS + FORMER_REPS
+    out["reps"] = ["Jay Reyes", "Daniel Barba"] + sorted(sold_by - {"Jay Reyes", "Daniel Barba"}, key=lambda n: (order.index(n) if n in order else len(order), n))
+    out["othersNote"] = None
+    if isinstance(out.get("inbound"), dict):
+        out["inbound"]["othersNote"] = None
+    return out
+
+
+def sale_source_label(channel, lead_source):
+    # Sales List "Source" column: just the source, e.g. "Inbound", "Meta Ads",
+    # "Website Form"; no channel name (Mika, 2026-10-30).
+    if channel == "Not matched":
+        return "Not matched to a lead"
+    raw = (lead_source or "").strip()
+    # GMB, Truck Number, FieldRoutes... are all calls to the Inbound lines: just "Inbound".
+    if raw.lower().startswith("inbound") or channel in ("Inbound", "Commercial"):
+        return "Inbound"
+    low = raw.lower()
+    return ("Meta Ads" if "meta" in low or "facebook" in low or "paid social" in low else
+            "Website Form" if "form" in low else
+            "Referral" if "referral" in low else
+            "Missed Inbound Call" if "missed inbound" in low else
+            raw or "No source set")
+
+
 def with_live_channels(snapshot):
     # Gives each FieldRoutes sale a channel by matching its phone/email keys to
     # the lead lists above: the most recent lead that came in on or before the
@@ -146,6 +186,7 @@ def with_live_channels(snapshot):
     # before the sale are "Not matched". Rebuilds the Inbound Leads section from the Inbound sales.
     # Falls back to the stored Inbound tags if the snapshot predates match keys
     # or HighLevel is down.
+    snapshot = with_rep_names(snapshot)
     sales = snapshot.get("sales") or []
     if not any(sale.get("keys") for sale in sales):
         return snapshot
@@ -176,13 +217,14 @@ def with_live_channels(snapshot):
         if sale["channel"] == "Inbound" and WARM_LEAD_SOURCES.match((best[3] or "").strip()):
             sale["channel"] = "Warm Outbound"
         sale["leadContactId"] = best[2] if best else None
+        sale["source"] = sale_source_label(sale["channel"], best[3] if best else None)
         sale["inbound"] = sale["channel"] == "Inbound"
         sale.pop("keys", None)
     inbound = dict(live.get("inbound") or {})
     inbound["rows"] = revenue_rows([sale for sale in live["sales"] if sale["inbound"]])
     inbound["asOf"] = datetime.now(BUSINESS_TZ).date().isoformat()
     inbound["label"] = "Inbound leads (any lead in the main HighLevel account) matched to FieldRoutes by phone/email, where that lead is the most recent lead before the sale (matched live)"
-    inbound.setdefault("reps", live.get("reps"))
+    inbound["reps"] = live.get("reps")
     live["inbound"] = inbound
     live["channels"] = [ch for ch, _ in _channel_lead_sources()] + ["Not matched"]
     live.pop("inboundSubscriptionIds", None)
@@ -197,7 +239,25 @@ BUSINESS_TZ = ZoneInfo("America/Chicago")
 REPS = [
     {"name": "Jay Reyes", "pipelineId": "T1XpjVLy3lDfLVWY7f9D", "closedWonStageId": "47bfd32a-1e99-46af-9a47-4723a9af3e36"},
     {"name": "Daniel Barba", "pipelineId": "I7YdjQ5jlYF21SEl5B5g", "closedWonStageId": "342ebbe5-29be-46d7-aa19-4d486e841233"},
+    {"name": "James Graham Jr.", "pipelineId": "LnqE1gadHU7IyzfvIBMv", "closedWonStageId": "ee212943-abe0-4110-a437-a3646aa293a8"},
+    {"name": "Sergio Anaya", "pipelineId": "4QyVIDo2jPdiPQUflkLd", "closedWonStageId": "e05e0bd7-c78f-4906-a16b-edcaa56fc8e8", "onlyIfClosed": True},
 ]
+
+# Reps shown on the dashboard (Mika, 2026-10-30): Jay and Daniel always; James
+# Graham Jr. from Nov 1, 2026; former reps (Sergio Anaya, Jesus Felix) by name,
+# only in periods where they closed a deal. No "Others" bucket.
+CORE_REPS = ["Jay Reyes", "Daniel Barba", "James Graham Jr."]
+FORMER_REPS = ["Sergio Anaya", "Jesus Felix"]
+REP_START = {"James Graham Jr.": "2026-11-01"}
+
+
+def rep_active(name, end):
+    return end.isoformat() >= REP_START.get(name, "0000")
+
+
+def active_reps(end):
+    # Pipeline reps worth querying for a period ending on `end`.
+    return [r for r in REPS if rep_active(r["name"], end)]
 
 CLOSED_DATE_FIELD_ID = "y2AEQ5nyUzxhLLLnG6bx"
 QUALIFICATION_STATUS_FIELD_ID = "SYrPZw5WGIbpPYuiDaBx"
@@ -206,6 +266,20 @@ POWER_DIALER_ATTEMPT_FIELD_ID = "vNjCVqQ3NiMGBQ4mHehJ"
 LEAD_STAGE_FIELD_ID = "dt44fTl1UU9rY77EyAvb"
 SALES_REP_FIELD_ID = "LWLa9vQ7KLP3UuV5MMzc"
 PROPERTY_TYPE_FIELD_ID = "8d7ke2jHKefOOPYwswEJ"  # Residential / Commercial (main account only)
+COMMENTS_FIELD_ID = "ApQ29DPJs00MuMPSu0dq"  # Quality folder; holds the "Qualification reason (...): ..." line
+
+
+REASON_LABELS = {"Qualified": "Qualification reason", "Unqualified": "Unqualification reason", "Unknown": "Unknown reason"}
+
+
+def with_qualification_reason(comments, reason, source, status):
+    # One reason line labelled by status (Mika, 2026-10-30): "Qualification
+    # reason" / "Unqualification reason" / "Unknown reason". Replaces any earlier
+    # reason line and keeps the rest of the comments.
+    labels = tuple(l.lower() for l in REASON_LABELS.values())
+    kept = [l for l in str(comments or "").splitlines() if not l.lower().startswith(labels)]
+    line = f"{REASON_LABELS.get(status, 'Qualification reason')} ({source} {datetime.now(BUSINESS_TZ).date().isoformat()}): {reason}"
+    return "\n".join([line] + [l for l in kept if l.strip()])
 
 EXCLUDED_TAGS = {"termite setter program"}
 
@@ -668,8 +742,10 @@ def handle_inbound_qualified_leads(rep_name, start, end):
 
 
 def handle_sales(start, end):
-    with ThreadPoolExecutor(max_workers=len(REPS)) as pool:
-        reps_out = list(pool.map(lambda rep: rep_sales(rep, start, end), REPS))
+    reps = active_reps(end)
+    with ThreadPoolExecutor(max_workers=len(reps)) as pool:
+        reps_out = list(pool.map(lambda rep: rep_sales(rep, start, end), reps))
+    reps_out = [r for r, rep in zip(reps_out, reps) if not rep.get("onlyIfClosed") or r["count"]]
     for r in reps_out:
         r.pop("valueByContact", None)
     return {
@@ -830,15 +906,18 @@ def count_closed_sources(contacts, start, end):
 
 
 def compute_period_metrics(start, end, contacts, allowed_contact_ids=None):
-    with ThreadPoolExecutor(max_workers=len(REPS)) as pool:
-        sales_list = list(pool.map(lambda rep: rep_sales(rep, start, end, allowed_contact_ids), REPS))
+    reps = active_reps(end)
+    with ThreadPoolExecutor(max_workers=len(reps)) as pool:
+        sales_list = list(pool.map(lambda rep: rep_sales(rep, start, end, allowed_contact_ids), reps))
 
     all_contacts = get_all_contacts_cached()
     rolling_pool_stale = first_touch_qualifier_is_stale(all_contacts)
 
     total_value = sum(r["value"] for r in sales_list)
     reps_out = []
-    for rep, sales in zip(REPS, sales_list):
+    for rep, sales in zip(reps, sales_list):
+        if rep.get("onlyIfClosed") and not sales["count"]:
+            continue
         leads = rep_leads_count(contacts, rep["name"], start, end)
         qualified = rep_qualified_leads_count(contacts, rep["name"], start, end)
         closed_leads = rep_closed_leads_count(contacts, rep["name"], start, end)
@@ -1084,7 +1163,7 @@ TRANSCRIPT_WAIT_HOURS = 2
 UNKNOWN_WAIT_HOURS = 48
 QUALIFICATION_STATUS_OPTIONS = ("Qualified", "Unqualified", "Unknown")
 PROPERTY_TYPE_OPTIONS = ("Residential", "Commercial")
-FIRST_TOUCH_QUALIFIER_OPTIONS = ("Jay Reyes", "Daniel Barba", "Sergio Anaya")
+FIRST_TOUCH_QUALIFIER_OPTIONS = ("Jay Reyes", "Daniel Barba", "Sergio Anaya", "James Graham Jr.")
 CALL_AUDIT_FIELDS = ("handledBy", "callType", "qualified", "pitched", "outcome", "pest", "price", "summary", "notes")
 INBOUND_CALL_AUDIT_AUTO_PATH = os.path.join(HERE, "inbound_call_audit_auto.json")
 
@@ -1096,13 +1175,14 @@ Qualification Status rules:
 - Qualified = the lead is in our service area AND wants a pest service we offer. One-time treatments are offered ONLY for bed bugs and general pest control: a one-time request for those counts as Qualified; a one-time request for anything else (rodents, termites, mosquitoes, wildlife, etc.) is Unqualified, even if the rep pitched a recurring plan or price (Mika, 2026-10-26).
 - If the rep pitched a plan or quoted a price, the lead is Qualified — even voles/moles, existing customers adding a service, or callers who then declined.
 - If the rep pitched or said we service their area, treat them as in area.
+- Unqualified if the caller is calling for someone else (a friend, relative, client, tenant) or is not the one who will pay, e.g. a landlord who will have the renter pay (Mika, 2026-10-30).
 - Unqualified = out of service area, a pest we don't service, not a sales lead (pure account/billing/service-visit calls), WDI or real-estate inspection report requests, or the caller declined/hung up before anything could be judged as a sales lead.
 - Unknown = it genuinely can't be judged from the transcripts (no real conversation, voicemail only, cut off before the need or location came up).
 - Read ALL calls, not just the first: a cut-off or transferred first call is often followed by the real conversation.
 
-First-touch Qualifier = the Evo sales rep who had the first real conversation with the lead. Options: Jay Reyes, Daniel Barba, Sergio Anaya. \
+First-touch Qualifier = the Evo sales rep who had the first real conversation with the lead. Options: Jay Reyes, Daniel Barba, Sergio Anaya, James Graham Jr. \
 On inbound calls the rep's name comes from the greeting ("This is Jay"). Support staff who transfer the call don't count — use the rep they transfer to. \
-Use null if no real conversation happened or the person isn't one of those three reps. \
+ALWAYS fill it for Qualified and Unqualified leads (Mika, 2026-10-30): if no real conversation happened, use the rep who answered or made the first call (greeting or callback voicemail "This is Jay with EVO"). For Unknown leads with no real conversation, use null. Use null too when none of the reps ever handled a call. \
 Give it to the rep on the RECORDED calls, even if the caller mentions an earlier unrecorded talk with another rep. \
 A price relayed only to customer service, with the lead not on the line, does not make the lead Qualified (status Unknown), but that rep is still the First-touch Qualifier.
 
@@ -1118,10 +1198,10 @@ Per-call audit fields:
 - outcome: "Sold", "Pitched - declined/thinking", "Not pitched", "Callback/follow-up", or "N/A".
 - pest: the pest(s) discussed, short, or null. price: the plan/price quoted, short, or null.
 - summary: one plain sentence. notes: anything a manager should know (location, objections), or null.
-- reason (lead level): one or two sentences explaining the Qualification Status.
+- reason (lead level): one or two sentences explaining the Qualification Status. If it wasn't a sales call, say exactly what the call was about (e.g. "Not a sales call: existing customer calling to cancel because the price went up", "looking for an electrician"), never just "not a sales lead" (Mika, 2026-10-30).
 
 Verdict format (POST a JSON list of these):
-{"contactId": "...", "qualificationStatus": "Qualified|Unqualified|Unknown", "firstTouchQualifier": "Jay Reyes|Daniel Barba|Sergio Anaya|null", "propertyType": "Residential|Commercial|null",
+{"contactId": "...", "qualificationStatus": "Qualified|Unqualified|Unknown", "firstTouchQualifier": "Jay Reyes|Daniel Barba|Sergio Anaya|James Graham Jr.|null", "propertyType": "Residential|Commercial|null",
  "reason": "...", "calls": [{"messageId": "...", "handledBy": "...", "callType": "...", "qualified": "...", "pitched": false,
  "outcome": "...", "pest": null, "price": null, "summary": "...", "notes": null}]}"""
 
@@ -1359,6 +1439,11 @@ def handle_transcript_checker_verdicts(verdicts):
                 fields = [{"id": QUALIFICATION_STATUS_FIELD_ID, "field_value": status}]
                 if first_touch in FIRST_TOUCH_QUALIFIER_OPTIONS:
                     fields.append({"id": FIRST_TOUCH_QUALIFIER_FIELD_ID, "field_value": first_touch})
+                # Every status gets its reason in Comments (Mika, 2026-10-30).
+                if v.get("reason"):
+                    fields.append({"id": COMMENTS_FIELD_ID, "field_value": with_qualification_reason(
+                        custom_field_value(cfs, COMMENTS_FIELD_ID), v["reason"], "transcript checker", status
+                    )})
                 hl_request(f"/contacts/{contact_id}", method="PUT", body={"customFields": fields})
                 result = "written"
             # Property Type: only into a blank field, and only when the lead has a real transcript.
@@ -1407,8 +1492,8 @@ def handle_transcript_checker_verdicts(verdicts):
 # One funnel per channel (leads -> qualified -> sales) with sales from both
 # HighLevel (Closed/Won deals) and FieldRoutes (sold subscriptions matched to
 # the channel's leads, see with_live_channels). Reps are grouped the way the
-# Revenue tab groups FieldRoutes Sold By: Sergio and Jesus count as "Others".
-OVERVIEW_REPS = ["Jay Reyes", "Daniel Barba", "Others"]
+# Former reps show by name, only in periods where they closed a deal.
+
 SUB_ACCOUNT_CHANNELS = {
     # Qualified-by-rep uses the rep field each sub-account actually fills in.
     "Warm Outbound": {
@@ -1434,9 +1519,23 @@ SUB_ACCOUNT_CHANNELS = {
 WARM_LEAD_TYPES = [("Meta", "meta leads"), ("Website", "website leads"), ("Snoball", "snoball")]
 
 
+# Leads without one of those tags get a specific type, never "Other" (Mika, 2026-10-30).
+WARM_EXTRA_TYPES = ["Missed Inbound", "Referral", "Phone call-in", "Added manually"]
+
+
 def warm_lead_type(contact):
-    tags = set(contact.get("tags") or [])
-    return next((name for name, tag in WARM_LEAD_TYPES if tag in tags), "Other")
+    tags = {t.lower() for t in contact.get("tags") or []}
+    tagged = next((name for name, tag in WARM_LEAD_TYPES if tag in tags), None)
+    if tagged:
+        return tagged
+    source = (contact.get("source") or "").lower()
+    if "missed inbound" in tags or "missed inbound" in source:
+        return "Missed Inbound"
+    if "referral" in source or "referral" in tags:
+        return "Referral"
+    if tags & {"name via lookup", "couldn't find caller name"}:
+        return "Phone call-in"
+    return "Added manually"
 
 
 def _warm_breakdown(contacts, leads, hl_deals, fr_sales):
@@ -1445,7 +1544,7 @@ def _warm_breakdown(contacts, leads, hl_deals, fr_sales):
     hl_by_contact = {}
     for _, contact_id, value in hl_deals:
         hl_by_contact[contact_id] = max(value, hl_by_contact.get(contact_id, 0))
-    names = [name for name, _ in WARM_LEAD_TYPES] + ["Other"]
+    names = [name for name, _ in WARM_LEAD_TYPES] + WARM_EXTRA_TYPES
     out = []
     for name in names:
         fr = [sale for sale in fr_sales if type_of.get(sale.get("leadContactId")) == name]
@@ -1458,13 +1557,20 @@ def _warm_breakdown(contacts, leads, hl_deals, fr_sales):
             "hlCount": len(hl),
             "hlValue": round(sum(hl), 2),
         }
-        if name != "Other" or any(row[k] for k in ("leads", "frCount", "hlCount")):
+        if name not in WARM_EXTRA_TYPES or any(row[k] for k in ("leads", "frCount", "hlCount")):
             out.append(row)
     return out
 
 
 def overview_rep(name):
-    return name if name in ("Jay Reyes", "Daniel Barba") else "Others"
+    return name
+
+
+def overview_reps(end, channels=()):
+    # Core reps active in the period, plus any former rep who closed a deal in it.
+    reps = [r for r in CORE_REPS if rep_active(r, end)]
+    closers = {r["name"] for ch in channels for r in ch["reps"] if r["hlCount"] or r["frCount"]}
+    return reps + [r for r in FORMER_REPS if r in closers] + sorted(closers - set(reps) - set(FORMER_REPS))
 
 
 def _is_closed_won_stage(name):
@@ -1500,14 +1606,16 @@ def _rep_list(value):
     return value if isinstance(value, list) else ([value] if value else [])
 
 
-def _channel_summary(name, leads, qualified, qualified_by_rep, hl_deals, fr_sales):
+def _channel_summary(name, leads, qualified, qualified_by_rep, hl_deals, fr_sales, end):
     # hl_deals: (rep, contact_id, value); one sale per contact, larger value kept.
     by_contact = {}
     for rep, contact_id, value in hl_deals:
         if contact_id not in by_contact or value > by_contact[contact_id][1]:
             by_contact[contact_id] = (rep, value)
     reps = []
-    for rep in OVERVIEW_REPS:
+    names = [r for r in CORE_REPS if rep_active(r, end)]
+    names += sorted({r for r, _ in by_contact.values()} | {sale["group"] for sale in fr_sales} | set(qualified_by_rep) - set(names))
+    for rep in dict.fromkeys(names):
         hl = [v for r, v in by_contact.values() if r == rep]
         fr = [sale for sale in fr_sales if sale["group"] == rep]
         q = qualified_by_rep.get(rep, 0)
@@ -1521,6 +1629,12 @@ def _channel_summary(name, leads, qualified, qualified_by_rep, hl_deals, fr_sale
             "hlCloseRate": round(len(hl) / q * 100, 1) if q else None,
             "frCloseRate": round(len(fr) / q * 100, 1) if q else None,
         })
+    # Anyone but the active core reps shows only when they closed a deal in
+    # the period (Mika, 2026-10-30); "Customer nurture" isn't a rep.
+    core = [r for r in CORE_REPS if rep_active(r, end)]
+    reps = [r for r in reps if r["name"] in core or ((r["hlCount"] or r["frCount"]) and r["name"] != "Customer nurture")]
+    order = core + FORMER_REPS
+    reps.sort(key=lambda r: (order.index(r["name"]) if r["name"] in order else len(order), r["name"]))
     hl_count = len(by_contact)
     return {
         "name": name,
@@ -1538,9 +1652,10 @@ def _channel_summary(name, leads, qualified, qualified_by_rep, hl_deals, fr_sale
 
 def inbound_source_leads(start=None):
     # Inbound leads = every main-account contact whose source says "Inbound",
-    # commercial and May 5 imports included (Mika, 2026-10-29). Only test/junk
-    # tags are dropped.
-    return [c for c in _get_all_contacts_raw() if is_inbound_source(c.get("source")) and not is_tag_excluded(c)]
+    # May 5 imports included (Mika, 2026-10-29). Commercial leads are left out
+    # and shown on the Commercial tab only (Mika, 2026-10-30); test/junk tags dropped.
+    return [c for c in _get_all_contacts_raw()
+            if is_inbound_source(c.get("source")) and not is_tag_excluded(c) and not is_commercial_contact(c)]
 
 
 def handle_sales_overview(start, end):
@@ -1570,7 +1685,7 @@ def handle_sales_overview(start, end):
     inbound_ids = {c.get("id") for c in inbound}
     fr_inbound = [sale for sale in fr_by_channel("Inbound") if sale.get("leadContactId") in inbound_ids]
     fr_older = [sale for sale in fr_by_channel("Inbound") if sale.get("leadContactId") not in inbound_ids]
-    summary = _channel_summary("Inbound", len(leads), len(qualified), q_by_rep, hl_deals, fr_inbound)
+    summary = _channel_summary("Inbound", len(leads), len(qualified), q_by_rep, hl_deals, fr_inbound, end)
     summary["olderSources"] = {"count": len(fr_older), "acv": round(sum(sale["contractValue"] for sale in fr_older), 2)}
     channels.append(summary)
 
@@ -1589,27 +1704,144 @@ def handle_sales_overview(start, end):
             for rep_name, opp in sub_account_closed_won(name)
             if not is_test_opportunity(opp) and _deal_closed_on(opp, cfg["closed_date_field"], start, end)
         ]
-        summary = _channel_summary(name, len(leads), len(qualified), q_by_rep, hl_deals, fr_by_channel(name))
+        summary = _channel_summary(name, len(leads), len(qualified), q_by_rep, hl_deals, fr_by_channel(name), end)
         if name == "Warm Outbound":
             summary["leadTypes"] = _warm_breakdown(contacts, leads, hl_deals, fr_by_channel(name))
         if name == "Cold Outbound":
-            calls = [m for m in call_store(cfg["location"](), cfg["key"]()).calls(start, end) if m.get("direction") == "outbound"]
             users = location_user_names(cfg["location"](), cfg["key"]())
+            calls = [m for m in call_store(cfg["location"](), cfg["key"]()).calls(start, end)
+                     if m.get("direction") == "outbound" and is_rep_call(m, users)]
             by_rep = {}
             for m in calls:
                 rep = call_rep_label(m, users)
                 by_rep[rep] = by_rep.get(rep, 0) + 1
             summary["callsMade"] = len(calls)
-            summary["callsByRep"] = [{"name": r, "calls": n} for r, n in sorted(by_rep.items(), key=lambda kv: -kv[1])]
+            # Same reps, same order in "Calls made" and "Sold contracts" (Mika,
+            # 2026-10-30): everyone who called, most calls first, then anyone
+            # who sold without calling.
+            order = [r for r, _ in sorted(by_rep.items(), key=lambda kv: -kv[1])]
+            have = {r["name"] for r in summary["reps"]}
+            summary["reps"] += [{"name": r, "qualified": 0, "hlCount": 0, "hlValue": 0, "frCount": 0, "frAcv": 0,
+                                 "hlCloseRate": None, "frCloseRate": None} for r in order if r not in have]
+            order += [r["name"] for r in summary["reps"] if r["name"] not in order]
+            summary["reps"].sort(key=lambda r: order.index(r["name"]))
+            summary["callsByRep"] = [{"name": r, "calls": by_rep.get(r, 0)} for r in order]
         channels.append(summary)
 
     other = {ch: {"count": len(fr_by_channel(ch)), "acv": round(sum(sale["contractValue"] for sale in fr_by_channel(ch)), 2)}
              for ch in ("Not matched",)}
-    return {"reps": OVERVIEW_REPS, "channels": channels, "otherFieldRoutes": other,
+    return {"reps": overview_reps(end, channels), "channels": channels, "otherFieldRoutes": other,
             "dataThrough": snapshot.get("dataThrough") if snapshot else None}
 
 
 date_min = datetime.min.date()
+
+
+TEAM_CHANNELS = ["Inbound", "Warm Outbound", "Cold Outbound"]
+LEAD_CHANNELS = ["Inbound", "Warm Outbound"]
+
+# Lead Sources chart: Inbound, then each Warm lead type as the platform the
+# lead came from (Mika, 2026-10-30).
+PLATFORM_NAMES = {"gmb": "Google Business Profile", "google lsa": "Google LSA", "facebook ads": "Meta Ads",
+                  "truck number": "Truck Number", "fieldroutes": "FieldRoutes", "arco": "Arco",
+                  "main pest ai": "Main Pest AI"}
+WARM_PLATFORM_NAMES = {"Meta": "Meta Ads", "Website": "Website Form", "Phone call-in": "Warm Phone Call-in",
+                       "Missed Inbound": "Missed Inbound Call", "Referral": "Referral", "Added manually": "Added Manually"}
+
+
+def inbound_platform(contact):
+    parts = [p.strip() for p in (contact.get("source") or "").split("|")]
+    platform = parts[-1] if len(parts) > 1 else ""
+    if not platform:
+        return "Inbound Call (no platform set)"
+    return PLATFORM_NAMES.get(platform.lower(), platform)
+
+
+def team_lead_contacts(start, end):
+    # (channel, location id, contact, platform) for every Inbound + Warm lead added in the range.
+    in_range = lambda c: start <= (local_date(parse_date(c.get("dateAdded"))) or date_min) <= end
+    # GMB, Truck Number, FieldRoutes... are all phone calls to the Inbound lines,
+    # so they count as one "Inbound" source (Mika, 2026-10-30).
+    out = [("Inbound", LOCATION_ID, c, "Inbound") for c in inbound_source_leads(start) if in_range(c)]
+    cfg = SUB_ACCOUNT_CHANNELS["Warm Outbound"]
+    if cfg["key"]() and cfg["location"]():
+        out += [("Warm Outbound", cfg["location"](), c, WARM_PLATFORM_NAMES.get(warm_lead_type(c), warm_lead_type(c)))
+                for c in cfg["store"]().contacts() if in_range(c)]
+    return out
+
+
+def handle_team_combined(start, end):
+    # Sales Team tab (Mika, 2026-10-30): leads received, contracts closed and
+    # contract value combined across Inbound + Warm Outbound + Cold Outbound
+    # (every FieldRoutes sale in the period except Commercial, same as the
+    # "FieldRoutes Sales by Channel" table); close rate Inbound only.
+    overview = cached(("sales-overview", start, end), lambda: handle_sales_overview(start, end))
+    channels = [c for c in overview["channels"] if c["name"] in TEAM_CHANNELS]
+    snapshot = load_revenue_snapshot()
+    sales = [s for s in (with_live_channels(snapshot)["sales"] if snapshot else [])
+             if start.isoformat() <= s["sold"] <= end.isoformat() and s.get("channel") != "Commercial"]
+    inbound = next((c for c in channels if c["name"] == "Inbound"), None)
+    inbound_reps = {r["name"]: r for r in (inbound["reps"] if inbound else [])}
+    qualified_by = {}
+    for ch in channels:
+        for r in ch["reps"]:
+            qualified_by[r["name"]] = qualified_by.get(r["name"], 0) + r["qualified"]
+    total_value = sum(s["contractValue"] for s in sales)
+    names = [r for r in CORE_REPS if rep_active(r, end)]
+    names += [n for n in dict.fromkeys(s["group"] for s in sales) if n not in names]
+    out = []
+    for name in names:
+        mine = [s for s in sales if s["group"] == name]
+        q = qualified_by.get(name, 0)
+        # Jay and Daniel always; anyone else only with sales or qualified leads.
+        if name not in ("Jay Reyes", "Daniel Barba") and not mine and not q:
+            continue
+        value = round(sum(s["contractValue"] for s in mine), 2)
+        ib = inbound_reps.get(name) or {}
+        out.append({
+            "name": name,
+            "closedCount": len(mine),
+            "closedValue": value,
+            "qualifiedLeads": q,
+            "inboundQualified": ib.get("qualified", 0),
+            "closeRate": ib.get("frCloseRate"),
+            "pctOfTotal": round(value / total_value * 100, 1) if total_value else 0,
+        })
+    by_channel = {c: sum(1 for s in sales if s.get("channel") == c) for c in TEAM_CHANNELS + ["Not matched"]}
+    platforms = {}
+    for _, _, _, platform in team_lead_contacts(start, end):
+        platforms[platform] = platforms.get(platform, 0) + 1
+    return {
+        "reps": out,
+        "totals": {
+            # Leads received = Inbound + Warm Outbound only (Mika, 2026-10-30);
+            # Cold Outbound shows as rep call counts instead.
+            "leads": sum(c["leads"] for c in channels if c["name"] in LEAD_CHANNELS),
+            "qualifiedLeads": sum(c["qualified"] for c in channels if c["name"] in LEAD_CHANNELS),
+            "closedCount": len(sales),
+            "closedValue": round(total_value, 2),
+            "closeRate": inbound["frCloseRate"] if inbound else None,
+            "closeRateNote": f"Inbound only: {inbound['frCount']} sales / {inbound['qualified']} qualified" if inbound else "Inbound only",
+            "sources": dict(sorted(platforms.items(), key=lambda kv: -kv[1])),
+            "closedSources": by_channel,
+        },
+        "warmCalls": _warm_rep_calls(start, end),
+        "coldCalls": next((c.get("callsMade") for c in channels if c["name"] == "Cold Outbound"), None),
+        "dataThrough": overview.get("dataThrough"),
+    }
+
+
+def _warm_rep_calls(start, end):
+    # Outgoing calls sales reps made from the Warm Outbound account (same rep-only rule as Cold).
+    if not (WARM_OUTBOUND_API_KEY and WARM_OUTBOUND_LOCATION_ID):
+        return None
+    users = location_user_names(WARM_OUTBOUND_LOCATION_ID, WARM_OUTBOUND_API_KEY)
+    calls = [m for m in call_store(WARM_OUTBOUND_LOCATION_ID, WARM_OUTBOUND_API_KEY).calls(start, end)
+             if m.get("direction") == "outbound" and is_rep_call(m, users)]
+    by_rep = {}
+    for m in calls:
+        by_rep[call_rep_label(m, users)] = by_rep.get(call_rep_label(m, users), 0) + 1
+    return {"total": len(calls), "byRep": [{"name": r, "calls": n} for r, n in sorted(by_rep.items(), key=lambda kv: -kv[1])]}
 
 
 def handle_commercial(start, end):
@@ -1632,7 +1864,8 @@ def handle_commercial(start, end):
         if opp.get("contactId") in commercial_ids and not is_test_opportunity(opp)
         and _deal_closed_on(opp, CLOSED_DATE_FIELD_ID, start, end)
     ]
-    return {"reps": OVERVIEW_REPS, "channels": [_channel_summary("Commercial", len(leads), len(qualified), q_by_rep, hl_deals, fr)],
+    channels = [_channel_summary("Commercial", len(leads), len(qualified), q_by_rep, hl_deals, fr, end)]
+    return {"reps": overview_reps(end, channels), "channels": channels,
             "taggedCommercial": len(commercial), "dataThrough": snapshot.get("dataThrough") if snapshot else None}
 
 
@@ -1655,7 +1888,19 @@ KNOWN_OLD_USERS = {
     "JUGrZ3c7aw0XZJipG2hv": "Jay Reyes",     # 404 on /users; "This is Jay with Evo" on its calls
     "vnTmQZ5Hj0G62jbuLBcv": "Daniel Barba",  # not a main-account user; "This is Daniel" on its calls
     "oJQH2cnA8rODttA2fsd7": "James",         # 404 on /users; "This is James" (termite inspection scheduling)
+    "TlGxGbhydmIu5vebr9fu": "Shaquille Munoz",  # 404 on /users; "Shaquille from Evo" on its Cold Outbound calls
 }
+
+
+def is_rep_call(m, users):
+    # Calls a sales rep actually made (Mika, 2026-10-30): no workflow ringless
+    # voicemail drops (they show under office-line users), no calls without a
+    # user, no office phone lines or test calls.
+    if m.get("messageType") == "TYPE_CAMPAIGN_VOICEMAIL":
+        return False
+    label = call_rep_label(m, users)
+    return not (label.startswith("No rep") or label == "Unknown user" or label == "Mika Monte"
+                or "office" in label.lower() or any(ch.isdigit() for ch in label))
 
 
 def location_user_names(location_id, api_key):
@@ -2138,7 +2383,7 @@ def _calls_by_label(location_id, api_key, start, end, label, outbound_only=False
     users = location_user_names(location_id, api_key)
     per_contact = {}
     for m in call_store(location_id, api_key).calls(start, end):
-        if outbound_only and m.get("direction") != "outbound":
+        if outbound_only and (m.get("direction") != "outbound" or not is_rep_call(m, users)):
             continue
         rep = call_rep_label(m, users)
         if rep != label:
@@ -2206,6 +2451,26 @@ def handle_chart_leads(chart, key, start, end, channel=None):
                 continue
             rows.append(_lead_row(c.get("id"), LOCATION_ID, _contact_name(c), c.get("source"), added.isoformat()))
         return {"title": ("Closed Leads" if chart == "team-closed-sources" else "Leads") + f" — {key}", "rows": rows}
+    if chart in ("tc-sold", "tc-qualified", "tc-close", "tc-sources", "tc-closed-sources"):
+        rows = []
+        if chart == "tc-sources":
+            rows = [_lead_row(c.get("id"), loc, _contact_name(c), ch, (local_date(parse_date(c.get("dateAdded"))) or date_min).isoformat())
+                    for ch, loc, c, platform in team_lead_contacts(start, end) if platform == key]
+            return {"title": f"{key} — Leads (Inbound + Warm Outbound)", "rows": rows}
+        for ch in TEAM_CHANNELS:
+            if chart in ("tc-sources", "tc-closed-sources") and key != ch:
+                continue
+            if chart in ("tc-sold", "tc-close"):
+                rows += _overview_sales(ch, start, end, lambda sale: sale["group"] == key)
+            if chart in ("tc-qualified", "tc-close"):
+                rows += _overview_qualified(ch, start, end, key)
+            if chart == "tc-closed-sources":
+                rows += _overview_sales(ch, start, end, lambda sale: True)
+        titles = {"tc-sold": "Sold Contracts", "tc-qualified": "Qualified Leads", "tc-close": "Sold & Qualified",
+                  "tc-sources": "Leads", "tc-closed-sources": "Sold Contracts"}
+        return {"title": f"{key} — {titles[chart]} (Inbound + Warm + Cold)", "rows": rows}
+    if chart == "ov-sold-channel":
+        return {"title": f"{key} — Sold Contracts", "rows": _overview_sales(key, start, end, lambda sale: True)}
     if chart == "ov-sold":
         return {"title": f"{channel} — {key} — Sold Contracts", "rows": _overview_sales(channel, start, end, lambda sale: sale["group"] == key)}
     if chart == "ov-qualified":
@@ -2424,6 +2689,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self.send_json(cached(("call-count", start, end), lambda: handle_call_count(start, end)))
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
+            return
+
+        if parsed.path in ("/api/team-combined", "/api/team-combined-compare"):
+            try:
+                start = datetime.fromisoformat(qs["start"][0]).date()
+                end = datetime.fromisoformat(qs["end"][0]).date()
+                if parsed.path == "/api/team-combined":
+                    self.send_json(handle_team_combined(start, end))
+                else:
+                    ps = datetime.fromisoformat(qs["prevStart"][0]).date()
+                    pe = datetime.fromisoformat(qs["prevEnd"][0]).date()
+                    self.send_json({"current": handle_team_combined(start, end), "previous": handle_team_combined(ps, pe)})
+            except (KeyError, ValueError):
+                self.send_json({"error": "start and end query params (YYYY-MM-DD) are required"}, 400)
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
             return

@@ -432,8 +432,17 @@ document.querySelectorAll(".view-tab").forEach((tab) => {
       .getElementById("range-toolbar")
       .classList.toggle("hidden", !["sales", "sales-overview", "commercial"].includes(view));
     if (view === "leaderboard") loadLeaderboard();
-    if (view === "sales-overview" && currentRange.start) loadSalesOverview(fmtDate(currentRange.start), fmtDate(currentRange.end));
-    if (view === "commercial" && currentRange.start) loadCommercial(fmtDate(currentRange.start), fmtDate(currentRange.end));
+    // Each tab opens on its own default range (Mika, 2026-10-30): Sales
+    // Overview = This Week, Commercial = This Month.
+    const now = businessToday();
+    if (view === "sales-overview") {
+      setActiveButton("week");
+      applyRange("week", startOfWeek(now), now);
+    }
+    if (view === "commercial") {
+      setActiveButton("month");
+      applyRange("month", startOfMonth(now), now);
+    }
     if (view === "revenue") loadRevenue();
   });
 });
@@ -503,15 +512,21 @@ function saleCustomerLink(sale) {
   return `<a class="lead-link" href="${ghlContactUrl(loc, sale.leadContactId)}" target="_blank" rel="noopener">${escapeHTML(sale.customer)}</a>`;
 }
 
+// Channel plus the lead's platform, e.g. "Warm Outbound · Meta Ads" (Mika, 2026-10-30).
+function saleSource(s) {
+  return s.source || s.channel || (s.inbound ? "Inbound" : "—");
+}
+
 function salesTableHTML(list) {
   return `<table class="deal-table call-log-table">
-    <thead><tr><th>Sold</th><th>Customer</th><th>Rep</th><th>Plan</th><th>City</th><th class="num">Contract Value</th><th class="num">ARV</th><th class="num">Months</th><th>Status</th></tr></thead>
+    <thead><tr><th>Sold</th><th>Customer</th><th>Rep</th><th>Source</th><th>Plan</th><th>City</th><th class="num">Contract Value</th><th class="num">ARV</th><th class="num">Months</th><th>Status</th></tr></thead>
     <tbody>${list
       .map(
         (s) => `<tr>
           <td class="nowrap">${formatDealDate(s.sold)}</td>
-          <td>${saleCustomerLink(s)}${s.channel || s.inbound ? ` <span class="call-pill">${escapeHTML(s.channel || "Inbound")}</span>` : ""}</td>
+          <td>${saleCustomerLink(s)}</td>
           <td class="nowrap">${escapeHTML(s.rep)}</td>
+          <td class="nowrap">${escapeHTML(saleSource(s))}</td>
           <td>${escapeHTML(s.plan || "")}</td>
           <td class="nowrap">${escapeHTML(s.city || "")}</td>
           <td class="num">${currency(s.contractValue)}</td>
@@ -573,13 +588,14 @@ function renderSalesList() {
   const statusText = (s) =>
     s.serviced ? (s.cancelled ? "Serviced, then cancelled" : "Serviced & active") : s.cancelled ? "Cancelled before service" : `Not serviced (${s.initialStatus || "—"})`;
   el.innerHTML = `<table class="deal-table call-log-table">
-    <thead><tr><th>Sold</th><th>Customer</th><th>Rep</th><th>Plan</th><th>City</th><th class="num">Contract Value</th><th class="num">ARV</th><th class="num">Months</th><th>Status</th></tr></thead>
+    <thead><tr><th>Sold</th><th>Customer</th><th>Rep</th><th>Source</th><th>Plan</th><th>City</th><th class="num">Contract Value</th><th class="num">ARV</th><th class="num">Months</th><th>Status</th></tr></thead>
     <tbody>${list
       .map(
         (s) => `<tr>
           <td class="nowrap">${formatDealDate(s.sold)}</td>
-          <td>${escapeHTML(s.customer)}${s.inbound ? ' <span class="call-pill">Inbound</span>' : ""}</td>
+          <td>${saleCustomerLink(s)}</td>
           <td class="nowrap">${escapeHTML(s.rep)}</td>
+          <td class="nowrap">${escapeHTML(saleSource(s))}</td>
           <td>${escapeHTML(s.plan || "")}</td>
           <td class="nowrap">${escapeHTML(s.city || "")}</td>
           <td class="num">${currency(s.contractValue)}</td>
@@ -775,17 +791,21 @@ function renderChannelFunnels(el, channels, prefix) {
   el.innerHTML = channels.map(block).join("");
   channels.forEach((ch, i) => {
     renderBarChart(`${prefix}-sold-${i}`, ch.reps, {
+      keepOrder: ch.name === "Cold Outbound",
+      vertical: ch.name === "Cold Outbound",
       onClick: (r) => openChartLeads("ov-sold", r.name, ch.name),
       valueOf: (r) => r.frCount,
       formatValue: (item) => `${item.value}`,
     });
     if (ch.name === "Warm Outbound") {
       renderBarChart(`${prefix}-types-${i}`, ch.leadTypes, {
+        vertical: true,
         valueOf: (t) => t.leads,
         formatValue: (item) => `${item.value}`,
         onClick: (t) => openChartLeads("ov-types", t.name, ch.name),
       });
       renderBarChart(`${prefix}-typesales-${i}`, ch.leadTypes, {
+        vertical: true,
         onClick: (t) => openChartLeads("ov-typesales", t.name, ch.name),
         valueOf: (t) => t.frCount,
         formatValue: (item) => `${item.value}`,
@@ -794,6 +814,8 @@ function renderChannelFunnels(el, channels, prefix) {
     }
     if (ch.name === "Cold Outbound") {
       renderBarChart(`${prefix}-calls-${i}`, ch.callsByRep && ch.callsByRep.length ? ch.callsByRep : [{ name: "No calls", calls: 0 }], {
+        keepOrder: true,
+        vertical: true,
         valueOf: (r) => r.calls,
         onClick: (r) => r.name !== "No calls" && openChartLeads("ov-calls", r.name, ch.name),
         formatValue: (item) => `${item.value}`,
@@ -840,7 +862,9 @@ async function loadSalesOverview(start, end) {
       { label: "Outbound — Cold", channels: ["Cold Outbound"] },
       { label: "Not matched to a lead", channels: ["Not matched"] },
     ];
-    const notes = [`${data.reps.join(" + ")} · FieldRoutes sales credited by Sold By`];
+    // Only the reps who sold in this period (Mika, 2026-10-30).
+    const soldBy = data.reps.filter((r) => inRange.some((s) => s.group === r));
+    const notes = [`${(soldBy.length ? soldBy : ["No sales"]).join(" + ")} · FieldRoutes sales credited by Sold By`];
     if (data.othersNote) notes.push(data.othersNote);
     notes.push(
       "Channel = the HighLevel account of the most recent lead with the same phone/email that came in on or before the sale: Inbound (main account, any source), Warm Outbound or Cold Outbound (those sub-accounts)"
@@ -860,14 +884,54 @@ async function loadSalesOverview(start, end) {
           revenueTableRow(prefix ? `${prefix} — ${g.label}` : g.label, sumSales(of(list, g.channels)), { ...range, ...extra, channels: g.channels }, g.subtotal ? "revenue-subtotal" : "")
         )
         .join("");
-    document.getElementById("overview-channel-table").innerHTML = revenueTable(rowsFor(inRange, {}), revenueTableRow("Total", all, range, "revenue-total"));
-    const repRows = data.reps
-      .map((rep) => {
+    // Chart instead of a table (Mika, 2026-10-30): sold contracts per channel, with contract value.
+    const chEl = document.getElementById("overview-channel-table");
+    if (!inRange.length) {
+      chEl.innerHTML = `<p class="empty-note">No FieldRoutes sales in this period yet. FieldRoutes data goes through ${formatDealDate(data.dataThrough)}.</p>`;
+    } else {
+      chEl.innerHTML = `<h3 class="chart-label">${all.sold} sold · ${currency(all.acv)} total contract value</h3><div id="overview-channel-chart" class="bar-wrap"></div>`;
+      const chBars = groups
+        .filter((g) => !g.subtotal)
+        .map((g) => {
+          const t = sumSales(of(inRange, g.channels));
+          return { name: g.label.replace("Outbound — ", ""), channel: g.channels[0], sold: t.sold, acv: t.acv };
+        });
+      renderBarChart("overview-channel-chart", chBars, {
+        keepOrder: true,
+        valueOf: (b) => b.sold,
+        formatValue: (item) => (item.value ? `${item.value} · ${currency(item.rep.acv)}` : "0"),
+        onClick: (b) => b.sold && openChartLeads("ov-sold-channel", b.channel),
+      });
+    }
+    // One chart per sales rep: their sales by channel (Mika, 2026-10-30).
+    const repEl = document.getElementById("overview-rep-table");
+    const sellers = data.reps.filter((rep) => inRange.some((s) => s.group === rep));
+    if (!inRange.length) {
+      repEl.innerHTML = `<p class="empty-note">No FieldRoutes sales in this period yet. FieldRoutes data goes through ${formatDealDate(data.dataThrough)}.</p>`;
+    } else {
+      repEl.innerHTML = `<div class="rep-chart-grid">${sellers
+        .map((rep, i) => {
+          const t = sumSales(inRange.filter((s) => s.group === rep));
+          return `<div class="rep-chart"><h3 class="chart-label">${escapeHTML(rep)} · ${t.sold} sold · ${currency(t.acv)}</h3><div id="rep-chart-${i}" class="bar-wrap"></div></div>`;
+        })
+        .join("")}</div>`;
+      sellers.forEach((rep, i) => {
         const mine = inRange.filter((s) => s.group === rep);
-        return rowsFor(mine, { rep }, rep) + revenueTableRow(`${rep} — Total`, sumSales(mine), { ...range, rep }, "revenue-total");
-      })
-      .join("");
-    document.getElementById("overview-rep-table").innerHTML = revenueTable(repRows, revenueTableRow("Team", all, range, "revenue-total"));
+        const bars = groups
+          .filter((g) => !g.subtotal)
+          .map((g) => {
+            const t = sumSales(of(mine, g.channels));
+            return { name: g.label.replace("Outbound — ", ""), channel: g.channels[0], sold: t.sold, acv: t.acv };
+          });
+        renderBarChart(`rep-chart-${i}`, bars, {
+          keepOrder: true,
+          vertical: true,
+          valueOf: (b) => b.sold,
+          formatValue: (item) => (item.value ? `${item.value} · ${currency(item.rep.acv)}` : "0"),
+          onClick: (b) => b.sold && openChartLeads("ov-sold", rep, b.channel),
+        });
+      });
+    }
   } catch (e) {
     banner.classList.remove("hidden");
     banner.textContent = `Sales overview: ${e.message}`;
@@ -910,7 +974,7 @@ async function loadRevenue() {
     const inbound = data.inbound;
     if (inbound) {
       const it = sumRevenueRows(inbound.rows);
-      document.getElementById("revenue-inbound-note").textContent = `${inbound.label}. ${inbound.othersNote}.`;
+      document.getElementById("revenue-inbound-note").textContent = `${inbound.label}.${inbound.othersNote ? ` ${inbound.othersNote}.` : ""}`;
       document.getElementById("revenue-inbound-kpi-row").innerHTML = `
         <div class="kpi-card"><div class="kpi-label">Closed/Won</div><div class="kpi-value">${it.sold}</div><div class="kpi-small">${currency(it.acv)} total contract value<br>${currency(it.acv / it.sold)} avg contract value</div></div>
         <div class="kpi-card"><div class="kpi-label">Serviced</div><div class="kpi-value">${it.serviced}</div><div class="kpi-small">${currency(it.servicedAcv)} total contract value<br>${currency(it.servicedAcv / it.serviced)} avg contract value · ${pctLabel(rate(it.serviced, it.sold))}</div></div>
@@ -999,6 +1063,43 @@ function renderTopKPIRow(curr, prev) {
   });
 }
 
+// Sales Team KPIs (Mika, 2026-10-30): leads, contracts closed and contract
+// value combined across Inbound + Warm + Cold; close rate Inbound only; Warm
+// Outbound outgoing call count.
+function renderTeamKPIRow(curr, prev) {
+  const t = curr.totals;
+  const p = prev ? prev.totals : null;
+  const d = (a, b) => (p ? deltaHTML(pctChange(a, b)) : "");
+  const leadItems = [
+    { label: "Leads Received", big: `${t.leads}`, small: "Inbound + Warm Outbound", delta: d(t.leads, p && p.leads) },
+    {
+      label: "Warm Outbound Calls",
+      big: curr.warmCalls ? `${curr.warmCalls.total}` : "—",
+      small: "outbound dials by sales reps",
+      delta: prev && curr.warmCalls && prev.warmCalls ? d(curr.warmCalls.total, prev.warmCalls.total) : "",
+    },
+    {
+      label: "Cold Outbound Calls",
+      big: curr.coldCalls !== null && curr.coldCalls !== undefined ? `${curr.coldCalls}` : "—",
+      small: "outbound dials by sales reps",
+      delta: prev && curr.coldCalls !== null && prev.coldCalls ? d(curr.coldCalls, prev.coldCalls) : "",
+    },
+  ];
+  const items = [
+    { label: "Contracts Closed", big: `${t.closedCount}`, small: "Inbound + Warm + Cold", delta: d(t.closedCount, p && p.closedCount) },
+    { label: "Total Contract Value", big: currency(t.closedValue), small: "Inbound + Warm + Cold", delta: d(t.closedValue, p && p.closedValue) },
+    {
+      label: "Close Rate (Inbound)",
+      big: t.closeRate !== null && t.closeRate !== undefined ? `${t.closeRate}%` : "—",
+      small: t.closeRateNote || "",
+      delta: p && t.closeRate !== null && p.closeRate !== null ? deltaHTML(t.closeRate - p.closeRate) : "",
+    },
+  ];
+  const card = (item) => `<div class="kpi-card"><div class="kpi-label">${item.label}</div><div class="kpi-value">${item.big}</div>${item.small ? `<div class="kpi-small">${item.small}</div>` : ""}${item.delta ? `<div class="kpi-delta">${item.delta} vs previous period</div>` : ""}</div>`;
+  // Leads and contracts together at the top of the tab (Mika, 2026-10-30).
+  document.getElementById("kpi-row").innerHTML = leadItems.concat(items).map(card).join("");
+}
+
 function renderKPIRow(curr, prev, elId = "kpi-row", { includeTotalClosedRate = true } = {}) {
   const el = document.getElementById(elId);
   el.innerHTML = "";
@@ -1039,9 +1140,9 @@ function renderKPIRow(curr, prev, elId = "kpi-row", { includeTotalClosedRate = t
       delta: prev ? deltaHTML(pctChange(curr.totals.closedValue, prev.totals.closedValue)) : "",
     },
     {
-      label: "Close Rate",
+      label: curr.totals.closeRateNote ? "Close Rate (Inbound)" : "Close Rate",
       big: closeRate !== null ? `${closeRate}%` : "—",
-      small: `${sales} sales / ${qualified} qualified`,
+      small: curr.totals.closeRateNote || `${sales} sales / ${qualified} qualified`,
       delta:
         prev && closeRate !== null && prev.totals.closeRate !== null
           ? deltaHTML(closeRate - prev.totals.closeRate)
@@ -1075,30 +1176,41 @@ function renderKPIRow(curr, prev, elId = "kpi-row", { includeTotalClosedRate = t
 }
 
 function renderSources(curr, prev) {
-  const order = ["Inbound"];
-  const items = order.map((name) => ({
+  // Leads received (Inbound + Warm Outbound) by the platform they came from:
+  // GMB, Meta Ads, Truck Number... most leads first (Mika, 2026-10-30).
+  const items = Object.keys(curr.totals.sources).map((name) => ({
     name,
     _prev: prev ? { count: prev.totals.sources[name] || 0 } : null,
     count: curr.totals.sources[name] || 0,
   }));
   renderBarChart("sources-chart", items, {
-    onClick: (r) => openChartLeads("team-sources", r.name),
+    vertical: true,
+    keepOrder: true,
+    onClick: (r) => openChartLeads("tc-sources", r.name),
     valueOf: (r) => r.count,
     formatValue: (item) => `${item.value}`,
   });
 }
 
+// "60%" of the chart's total, shown under each bar's number.
+function shareOf(items, valueOf) {
+  const total = items.reduce((sum, r) => sum + (valueOf(r) || 0), 0);
+  return (item) => `${total ? Math.round((item.value / total) * 1000) / 10 : 0}%`;
+}
+
 function renderClosedSources(curr, prev) {
-  const order = ["Inbound"];
+  const order = ["Inbound", "Warm Outbound", "Cold Outbound"].concat(curr.totals.closedSources["Not matched"] ? ["Not matched"] : []);
   const items = order.map((name) => ({
     name,
     _prev: prev ? { count: prev.totals.closedSources[name] || 0 } : null,
     count: curr.totals.closedSources[name] || 0,
   }));
   renderBarChart("closed-sources-chart", items, {
-    onClick: (r) => openChartLeads("team-closed-sources", r.name),
+    vertical: true,
+    onClick: (r) => openChartLeads("tc-closed-sources", r.name),
     valueOf: (r) => r.count,
     formatValue: (item) => `${item.value} sold`,
+    subValue: shareOf(items, (r) => r.count),
     showDelta: true,
   });
 }
@@ -1114,7 +1226,7 @@ function renderLeaderboardList(containerId, reps) {
   const el = document.getElementById(containerId);
   const ranked = reps
     .slice()
-    .sort((a, b) => (b.leaderboardCloseRate ?? -1) - (a.leaderboardCloseRate ?? -1));
+    .sort((a, b) => (b.closedValue || 0) - (a.closedValue || 0) || (b.closedCount || 0) - (a.closedCount || 0));
 
   if (!ranked.length || !ranked.some((r) => r.closedValue > 0)) {
     el.innerHTML = `<p class="deal-table-empty">No closed contracts yet.</p>`;
@@ -1129,7 +1241,7 @@ function renderLeaderboardList(containerId, reps) {
           <div class="leaderboard-rank">${rank}</div>
           <div class="leaderboard-name">${rep.name}</div>
           <div class="leaderboard-value">${currency(rep.closedValue)}</div>
-          <div class="leaderboard-rate">${rep.leaderboardCloseRate !== null ? rep.leaderboardCloseRate + "%" : "—"}</div>
+          <div class="leaderboard-rate">${rep.closedCount || 0} sold</div>
         </div>
       `;
     })
@@ -1141,7 +1253,8 @@ async function loadLeaderboardPeriod(key, containerId) {
   el.innerHTML = `<p class="deal-table-empty">Loading…</p>`;
   try {
     const { start, end } = rangeForLeaderboard(key);
-    const data = await fetchJSON(`/api/performance?start=${fmtDate(start)}&end=${fmtDate(end)}`);
+    // Same FieldRoutes sales (Inbound + Warm + Cold) as the Sales Team tab.
+    const data = await fetchJSON(`/api/team-combined?start=${fmtDate(start)}&end=${fmtDate(end)}`);
     renderLeaderboardList(containerId, data.reps);
   } catch (e) {
     el.innerHTML = `<p class="deal-table-empty">Failed to load: ${e.message}</p>`;
@@ -1198,7 +1311,7 @@ const barChartObserver = new ResizeObserver((entries) => {
 });
 
 function renderHorizontalBars(el, items, opts, width) {
-  const rowH = 30, gap = 8, top = items.some((i) => i.previousValue !== null && i.value > 0) ? 26 : 6;
+  const rowH = 30, gap = 8, top = items.some((i) => SHOW_PREV_GHOST && i.previousValue !== null && i.value > 0) ? 26 : 6;
   // Label column sized to the longest name (≈7px per character at 13px), capped at 45% of the width.
   const CHAR_W = 7.1;
   const longest = Math.max(...items.map((i) => i.label.length));
@@ -1208,7 +1321,7 @@ function renderHorizontalBars(el, items, opts, width) {
   const barX = labelW + 12;
   const barMax = Math.max(40, width - barX - valueW - 8);
   const height = top + items.length * (rowH + gap) + 4;
-  const rawMax = Math.max(1, ...items.map((i) => i.value), ...items.map((i) => i.previousValue || 0), opts.referenceLineAt || 0);
+  const rawMax = Math.max(1, ...items.map((i) => i.value), ...items.map((i) => (SHOW_PREV_GHOST ? i.previousValue || 0 : 0)), opts.referenceLineAt || 0);
   const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height, class: "bar-chart bar-chart-h" });
   if (opts.referenceLineAt) {
     const rx = barX + (opts.referenceLineAt / rawMax) * barMax;
@@ -1223,12 +1336,12 @@ function renderHorizontalBars(el, items, opts, width) {
     title.textContent = item.label;
     label.appendChild(title);
     g.appendChild(label);
-    if (item.previousValue !== null && item.value > 0) {
+    if (SHOW_PREV_GHOST && item.previousValue !== null && item.value > 0) {
       g.appendChild(svgEl("rect", { x: barX, y: y + 2, width: Math.max((item.previousValue / rawMax) * barMax, 0), height: rowH - 4, rx: 6, class: "bar-ghost-rect" }));
     }
     const w = (item.value / rawMax) * barMax;
     g.appendChild(svgEl("rect", { x: barX, y: y + 4, width: Math.max(w, item.value > 0 ? 3 : 0), height: rowH - 8, rx: 6, fill: "#2f9e3a", class: "bar-fill-rect" }));
-    const val = svgEl("text", { x: barX + Math.max(w, (item.previousValue !== null && item.value > 0 ? (item.previousValue / rawMax) * barMax : 0)) + 8, y: y + rowH / 2 + 5, class: "bar-value-label bar-value-label-h" });
+    const val = svgEl("text", { x: barX + Math.max(w, (SHOW_PREV_GHOST && item.previousValue !== null && item.value > 0 ? (item.previousValue / rawMax) * barMax : 0)) + 8, y: y + rowH / 2 + 5, class: "bar-value-label bar-value-label-h" });
     val.textContent = opts.formatValue(item);
     g.appendChild(val);
     if (opts.onClick) {
@@ -1238,7 +1351,7 @@ function renderHorizontalBars(el, items, opts, width) {
     }
     svg.appendChild(g);
   });
-  if (items.some((i) => i.previousValue !== null && i.value > 0)) {
+  if (items.some((i) => SHOW_PREV_GHOST && i.previousValue !== null && i.value > 0)) {
     const lx = width - 110;
     svg.appendChild(svgEl("rect", { x: lx, y: 4, width: 12, height: 12, rx: 3, class: "bar-ghost-rect" }));
     const lt = svgEl("text", { x: lx + 18, y: 14, class: "bar-ref-label" });
@@ -1247,6 +1360,9 @@ function renderHorizontalBars(el, items, opts, width) {
   }
   el.appendChild(svg);
 }
+
+// No grey previous-period bars (Mika, 2026-10-30); the "vs prev" % labels stay.
+const SHOW_PREV_GHOST = false;
 
 function renderBarChart(containerId, reps, opts) {
   const el = document.getElementById(containerId);
@@ -1261,7 +1377,7 @@ function renderBarChart(containerId, reps, opts) {
       value: opts.valueOf(r) || 0,
       previousValue: r._prev ? opts.valueOf(r._prev) || 0 : null,
     }))
-    .sort((a, b) => b.value - a.value);
+    .sort((a, b) => (opts.keepOrder ? 0 : b.value - a.value));
 
   // Many bars or long names overlap as columns, so those charts are drawn as
   // horizontal rows instead (Mika: "fix the visuals", 2026-10-27).
@@ -1271,13 +1387,17 @@ function renderBarChart(containerId, reps, opts) {
     items.length > 5 ||
     (probeWidth < 460 && items.length > 3) ||
     items.some((it) => wrapBarLabel(it.label, Math.max(6, Math.floor(probeBar / 8))).length > 2);
-  if (crowded && !opts.vertical) {
+  // Mika (2026-10-30): column charts everywhere, like "Sold Contracts by
+  // Channel"; horizontal rows only if a chart asks for them.
+  if (crowded && opts.horizontal) {
     renderHorizontalBars(el, items, opts, probeWidth);
     return;
   }
 
   const width = Math.max(320, Math.round(el.clientWidth) || 640);
-  const padding = { top: opts.showDelta ? 58 : 36, right: 20, bottom: 40, left: 20 };
+  // Optional second line under the number, e.g. share of the total (Mika, 2026-10-30).
+  const subGap = opts.subValue ? 18 : 0;
+  const padding = { top: (opts.showDelta ? 58 : 36) + subGap, right: 20, bottom: 40, left: 20 };
   const chartWidth = width - padding.left - padding.right;
   const barGap = 32;
   const barWidth = (chartWidth - barGap * (items.length - 1)) / items.length;
@@ -1291,7 +1411,7 @@ function renderBarChart(containerId, reps, opts) {
   const chartHeight = height - padding.top - padding.bottom;
   const baselineY = padding.top + chartHeight;
 
-  const rawMax = Math.max(1, ...items.map((i) => i.value), ...items.map((i) => i.previousValue || 0), opts.referenceLineAt || 0);
+  const rawMax = Math.max(1, ...items.map((i) => i.value), ...items.map((i) => (SHOW_PREV_GHOST ? i.previousValue || 0 : 0)), opts.referenceLineAt || 0);
   const maxValue = rawMax * 1.15;
 
   const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width: "100%", height, class: "bar-chart" });
@@ -1305,7 +1425,7 @@ function renderBarChart(containerId, reps, opts) {
     const x = padding.left + i * (barWidth + barGap);
     const group = svgEl("g", { class: "bar-group" });
 
-    if (item.previousValue !== null && item.value > 0) {
+    if (SHOW_PREV_GHOST && item.previousValue !== null && item.value > 0) {
       const ghostHeight = (item.previousValue / maxValue) * chartHeight;
       group.appendChild(
         svgEl("rect", { x, y: baselineY - ghostHeight, width: barWidth, height: Math.max(ghostHeight, 0), rx: 6, class: "bar-ghost-rect" })
@@ -1318,11 +1438,16 @@ function renderBarChart(containerId, reps, opts) {
     group.appendChild(bar);
 
     // Sit labels above whichever is taller — this period's bar or last period's outline.
-    const ghostTop = item.previousValue !== null && item.value > 0 ? baselineY - (item.previousValue / maxValue) * chartHeight : baselineY;
+    const ghostTop = SHOW_PREV_GHOST && item.previousValue !== null && item.value > 0 ? baselineY - (item.previousValue / maxValue) * chartHeight : baselineY;
     const labelY = Math.min(y, ghostTop);
-    const valueLabel = svgEl("text", { x: x + barWidth / 2, y: labelY - 10, "text-anchor": "middle", class: "bar-value-label" });
+    const valueLabel = svgEl("text", { x: x + barWidth / 2, y: labelY - 10 - subGap, "text-anchor": "middle", class: "bar-value-label" });
     valueLabel.textContent = opts.formatValue(item);
     group.appendChild(valueLabel);
+    if (opts.subValue) {
+      const subLabel = svgEl("text", { x: x + barWidth / 2, y: labelY - 10, "text-anchor": "middle", class: "bar-sub-label" });
+      subLabel.textContent = opts.subValue(item);
+      group.appendChild(subLabel);
+    }
 
     if (opts.showDelta && item.previousValue !== null && item.previousValue !== 0) {
       const change = ((item.value - item.previousValue) / item.previousValue) * 100;
@@ -1331,7 +1456,7 @@ function renderBarChart(containerId, reps, opts) {
       const arrow = rounded > 0 ? "▲" : rounded < 0 ? "▼" : "▬";
       const deltaLabel = svgEl("text", {
         x: x + barWidth / 2,
-        y: labelY - 32,
+        y: labelY - 32 - subGap,
         "text-anchor": "middle",
         class: `bar-delta-label ${cls}`,
       });
@@ -1369,7 +1494,7 @@ function renderBarChart(containerId, reps, opts) {
 
   svg.appendChild(svgEl("line", { x1: padding.left, x2: width - padding.right, y1: baselineY, y2: baselineY, class: "bar-axis-line" }));
 
-  if (items.some((item) => item.previousValue !== null && item.value > 0)) {
+  if (items.some((item) => SHOW_PREV_GHOST && item.previousValue !== null && item.value > 0)) {
     const legendX = width - padding.right - 104;
     svg.appendChild(svgEl("rect", { x: legendX, y: 4, width: 12, height: 12, rx: 3, class: "bar-ghost-rect" }));
     const legendLabel = svgEl("text", { x: legendX + 18, y: 14, class: "bar-ref-label" });
@@ -1736,7 +1861,6 @@ async function loadData() {
   const end = fmtDate(currentRange.end);
   const compareEnabled = document.getElementById("compare-checkbox").checked;
 
-  loadPowerDialer(start, end); // fire independently — can be slow on a cold cache, shouldn't block the rest
   loadSalesOverview(start, end); // fire independently — same reasoning
   loadCommercial(start, end);
 
@@ -1746,47 +1870,53 @@ async function loadData() {
     if (compareEnabled) {
       const prevRange = previousPeriodFor(currentRangeKey, currentRange.start, currentRange.end);
       const combined = await fetchJSON(
-        `/api/performance-compare?start=${start}&end=${end}&prevStart=${fmtDate(prevRange.start)}&prevEnd=${fmtDate(prevRange.end)}`
+        `/api/team-combined-compare?start=${start}&end=${end}&prevStart=${fmtDate(prevRange.start)}&prevEnd=${fmtDate(prevRange.end)}`
       );
       curr = combined.current;
       prev = combined.previous;
     } else {
-      curr = await fetchJSON(`/api/performance?start=${start}&end=${end}`);
+      curr = await fetchJSON(`/api/team-combined?start=${start}&end=${end}`);
     }
 
     if (token !== loadToken) return; // superseded by a newer request
 
-    renderTopKPIRow(curr, prev);
-    renderKPIRow(curr, prev);
+    // Sales Team = Inbound + Warm Outbound + Cold Outbound (Mika, 2026-10-30).
+    renderTeamKPIRow(curr, prev);
     renderSources(curr, prev);
     renderClosedSources(curr, prev);
 
     const repsWithPrev = withPrev(curr.reps, prev ? prev.reps : null);
 
     renderBarChart("sold-services-chart", repsWithPrev, {
+      vertical: true,
       valueOf: (r) => r.closedCount,
       formatValue: (item) => `${item.value} sold`,
+      subValue: shareOf(repsWithPrev, (r) => r.closedCount),
       showDelta: true,
-      onClick: (rep) => openChartLeads("team-deals", rep.name),
+      onClick: (rep) => openChartLeads("tc-sold", rep.name),
     });
 
     renderBarChart("sales-share", repsWithPrev, {
+      vertical: true,
       valueOf: (r) => r.closedValue,
-      formatValue: (item) => `${currency(item.value)} (${item.rep.pctOfTotal}%)`,
+      formatValue: (item) => currency(item.value),
+      subValue: (item) => `${item.rep.pctOfTotal}%`,
       showDelta: true,
-      onClick: (rep) => openChartLeads("team-deals", rep.name),
+      onClick: (rep) => openChartLeads("tc-sold", rep.name),
     });
 
+    // Inbound only, to match the Inbound close rate (Mika, 2026-10-30).
     renderBarChart("qualified-leads-chart", repsWithPrev, {
-      valueOf: (r) => r.qualifiedLeads,
+      valueOf: (r) => r.inboundQualified || 0,
       formatValue: (item) => `${item.value}`,
-      onClick: (rep) => openChartLeads("team-qualified", rep.name),
+      subValue: shareOf(repsWithPrev, (r) => r.inboundQualified),
+      onClick: (rep) => openChartLeads("ov-qualified", rep.name, "Inbound"),
     });
 
     renderBarChart("close-rate-chart", repsWithPrev, {
-      onClick: (rep) => openChartLeads("team-close", rep.name),
-      valueOf: (r) => r.closeRate || 0,
-      formatValue: (item) => (item.rep.closeRate !== null ? `${item.rep.closeRate}%` : "—"),
+      onClick: (rep) => openChartLeads("ov-close", rep.name, "Inbound"),
+      valueOf: (r) => (r.closeRate !== null && r.closeRate <= 100 ? r.closeRate : 0),
+      formatValue: (item) => (item.rep.closeRate !== null && item.rep.closeRate !== undefined ? `${item.rep.closeRate}%` : "—"),
       referenceLineAt: 100,
       referenceLabel: "100%",
     });
@@ -1798,7 +1928,9 @@ async function loadData() {
   }
 }
 
-// default to today on load
-setActiveButton("today");
-applyRange("today", businessToday(), businessToday());
-loadLeaderboard();
+// Opens on Sales Overview, This Week (Mika, 2026-10-30).
+setActiveButton("week");
+applyRange("week", startOfWeek(businessToday()), businessToday());
+// A link like localhost:8787/#sales opens that tab directly.
+const hashTab = document.querySelector(`.view-tab[data-view="${location.hash.slice(1)}"]`);
+if (hashTab) hashTab.click();
